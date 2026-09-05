@@ -1,0 +1,3 @@
+# Default the web viewer to loopback with explicit remote binding
+
+Version 1 binds its browser viewer to loopback by default but accepts an explicit listen address such as `0.0.0.0:3000` so an operator can reach a remote Linux host from a local laptop. A non-loopback bind is informed opt-in and emits a prominent startup warning because the server provides no built-in authentication or TLS; same-origin APIs, bounded requests and responses, strict security headers, and non-cacheable inspection data still apply, and internet-facing use belongs behind operator-controlled network protection or a trusted reverse proxy.

@@ -1,0 +1,3 @@
+# Keep direct parsing authoritative
+
+A bounds-checked safe-Rust parser is the sole authority for physical facts, byte coordinates, entity identities, relationships, diagnostics, and selected stored values. An optional resource-limited subprocess using bundled SQLite may enrich a private sidecar-free copy with fixed schema-metadata queries, but it never queries application tables, loads extensions or virtual-table modules, or overrides physical evidence, and its failure is reported only as unavailable semantic metadata; this asymmetric hybrid preserves exact damaged-file inspection without reimplementing every schema nuance in the trusted parser.
