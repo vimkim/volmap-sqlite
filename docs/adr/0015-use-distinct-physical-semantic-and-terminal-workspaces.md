@@ -1,0 +1,3 @@
+# Use distinct physical, semantic, and terminal workspaces
+
+The default web workspace uses the physical page atlas from prototype Variant A, schema-object navigation uses Variant B's explicit schema-to-root-to-descendant flow, and the focused TUI follows Variant C's dense keyboard-oriented evidence console. The variants showed that forcing all three priorities into one layout obscures the product's physical-first purpose, while distinct projections can share entity identity, sidecar warnings, byte maps, diagnostics, and selection state; the primary source remains commit `dc2062b` on branch `prototype/sqlite-navigation` and production UI will be rewritten rather than promoting prototype code.

@@ -127,3 +127,15 @@ _Avoid_: Raw payload, structural fact
 **Source identity**:
 An opaque, snapshot-scoped identifier used by adapters in place of an absolute database path. A separate display name may identify the source to the operator without disclosing its filesystem location.
 _Avoid_: Absolute path, database URL
+
+**Page atlas**:
+The default web workspace: a physical projection centered on the complete database-page mosaic, with selection-linked structural evidence and semantic ownership.
+_Avoid_: Schema browser, dashboard grid
+
+**Schema flow**:
+The semantic web view that makes a schema object's validated path through its root B-tree to descendant pages and cells explicit.
+_Avoid_: Object sidebar, SQL schema diagram
+
+**Terminal inspection flow**:
+The TUI's dense, keyboard-oriented evidence console for focused traversal from the database through schema or allocation entry points to a page and selected cell.
+_Avoid_: Web mirror, page atlas
