@@ -30,6 +30,10 @@ pub enum InspectionError {
     MissingFirstPage,
     #[error("the database ends with an incomplete page")]
     IncompletePage,
+    #[error(
+        "the valid database header declares {declared} pages, but the file contains {physical}"
+    )]
+    PageCountMismatch { declared: u32, physical: u32 },
     #[error("the database contains more pages than SQLite can address")]
     TooManyPages,
     #[error("the page inventory cannot fit in memory")]
@@ -113,7 +117,7 @@ impl InspectionSession {
             .filter(|size| *size >= MINIMUM_USABLE_SIZE)
             .ok_or(InspectionError::InvalidReservedBytes(reserved_bytes))?;
         let text_encoding = decode_text_encoding(&header)?;
-        let page_count = decode_page_count(file_length, page_size)?;
+        let page_count = decode_page_count(&header, file_length, page_size)?;
 
         let mut pages = Vec::new();
         pages
@@ -186,7 +190,11 @@ fn decode_text_encoding(
     }
 }
 
-fn decode_page_count(file_length: u64, page_size: u32) -> Result<u32, InspectionError> {
+fn decode_page_count(
+    header: &[u8; SQLITE_HEADER_SIZE],
+    file_length: u64,
+    page_size: u32,
+) -> Result<u32, InspectionError> {
     let page_size = u64::from(page_size);
     if file_length < page_size {
         return Err(InspectionError::MissingFirstPage);
@@ -199,7 +207,23 @@ fn decode_page_count(file_length: u64, page_size: u32) -> Result<u32, Inspection
     if page_count > MAXIMUM_PAGE_NUMBER {
         return Err(InspectionError::TooManyPages);
     }
-    u32::try_from(page_count).map_err(|_| InspectionError::TooManyPages)
+    let physical = u32::try_from(page_count).map_err(|_| InspectionError::TooManyPages)?;
+    let declared = decode_u32(header, 28);
+    let change_counter = decode_u32(header, 24);
+    let version_valid_for = decode_u32(header, 92);
+    if declared != 0 && change_counter == version_valid_for && declared != physical {
+        return Err(InspectionError::PageCountMismatch { declared, physical });
+    }
+    Ok(physical)
+}
+
+fn decode_u32(header: &[u8; SQLITE_HEADER_SIZE], offset: usize) -> u32 {
+    u32::from_be_bytes([
+        header[offset],
+        header[offset + 1],
+        header[offset + 2],
+        header[offset + 3],
+    ])
 }
 
 fn sanitized_display_name(path: &Path) -> String {

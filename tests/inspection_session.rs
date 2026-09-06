@@ -125,4 +125,49 @@ fn rejects_non_sqlite_and_impossible_header_geometry() {
         InspectionSession::open(&reserved_path),
         Err(InspectionError::InvalidReservedBytes(64))
     ));
+
+    let contradictory_count_path = directory.path().join("page-count.sqlite");
+    write_fixture(&contradictory_count_path, 4_096, 3, 0);
+    let mut contradictory_count = File::options()
+        .write(true)
+        .open(&contradictory_count_path)
+        .expect("open fixture");
+    contradictory_count
+        .seek(SeekFrom::Start(28))
+        .expect("seek to declared page count");
+    contradictory_count
+        .write_all(&2_u32.to_be_bytes())
+        .expect("replace declared page count");
+    assert!(matches!(
+        InspectionSession::open(&contradictory_count_path),
+        Err(InspectionError::PageCountMismatch {
+            declared: 2,
+            physical: 3
+        })
+    ));
+}
+
+#[test]
+fn ignores_a_declared_page_count_marked_stale_by_header_counters() {
+    let directory = TempDir::new().expect("temporary directory");
+    let database_path = directory.path().join("stale-count.sqlite");
+    write_fixture(&database_path, 4_096, 3, 0);
+    let mut file = File::options()
+        .write(true)
+        .open(&database_path)
+        .expect("open fixture");
+    file.seek(SeekFrom::Start(24))
+        .expect("seek to change counter");
+    file.write_all(&1_u32.to_be_bytes())
+        .expect("write change counter");
+    file.write_all(&2_u32.to_be_bytes())
+        .expect("write declared page count");
+    file.seek(SeekFrom::Start(92))
+        .expect("seek to version-valid-for counter");
+    file.write_all(&2_u32.to_be_bytes())
+        .expect("write version-valid-for counter");
+
+    let session =
+        InspectionSession::open(&database_path).expect("stale count is not authoritative");
+    assert_eq!(session.graph().snapshot.geometry.page_count, 3);
 }

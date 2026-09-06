@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -b && vite build",
+    "test": "npm run build && vitest run",
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
@@ -12,10 +13,13 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@testing-library/react": "16.3.3",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.7",
     "@vitejs/plugin-react": "6.1.1",
+    "jsdom": "29.0.1",
     "typescript": "7.0.2",
-    "vite": "8.2.2"
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
   }
 }
