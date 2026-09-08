@@ -25,7 +25,13 @@ fn progress_is_deterministic_and_only_a_finished_revision_is_navigable() {
         .unwrap();
     assert_eq!(
         progress,
-        vec![(0, None), (0, Some(2)), (1, Some(2)), (2, Some(2))]
+        vec![
+            (0, None),
+            (0, Some(2)),
+            (1, Some(2)),
+            (2, Some(2)),
+            (2, Some(2))
+        ]
     );
     assert_eq!(session.status().state, SessionState::Published);
     let revision = session.revision(1).unwrap();
@@ -269,4 +275,39 @@ fn a_worker_can_pause_at_progress_while_readers_query_and_the_operator_replaces_
         Err(InspectionError::Invalidated)
     ));
     assert_eq!(session.evidence().unwrap().pages.len(), 1);
+}
+
+#[test]
+fn cancellation_can_interrupt_verification_without_locking_status_or_publishing_unchecked_facts() {
+    use std::sync::{Arc, mpsc};
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("main.sqlite");
+    fixture(&path);
+    let session = Arc::new(InspectionSession::begin(&path).unwrap());
+    let worker_session = Arc::clone(&session);
+    let (reached, wait_for_verification) = mpsc::sync_channel(0);
+    let (resume, wait_for_resume) = mpsc::sync_channel(0);
+    let worker = std::thread::spawn(move || {
+        worker_session.scan(|status| {
+            if status.progress.verifying {
+                reached.send(()).unwrap();
+                wait_for_resume.recv().unwrap();
+            }
+            ScanControl::Continue
+        })
+    });
+    wait_for_verification.recv().unwrap();
+    assert!(session.status().progress.verifying);
+    session.stop(ScanControl::Cancel).unwrap();
+    assert_eq!(session.status().state, SessionState::Cancelled);
+    assert!(session.revision(1).is_err());
+    resume.send(()).unwrap();
+    worker.join().unwrap().unwrap();
+    assert!(!session.status().progress.verifying);
+    assert!(session.status().diagnostic.is_none());
+    assert_eq!(
+        session.status().coverage.unwrap().reason,
+        CoverageReason::Cancelled
+    );
+    assert!(session.revision(1).is_err());
 }

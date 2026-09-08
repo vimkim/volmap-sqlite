@@ -32,7 +32,7 @@ export interface SessionStatus {
   snapshotId: string;
   source: { id: string; displayName: string };
   state: "scanning" | "published" | "cancelled" | "stopped" | "invalidated" | "fatal";
-  progress: { unit: "pages"; completed: number; total: number | null };
+  progress: { unit: "pages"; completed: number; total: number | null; verifying: boolean };
   revision: number | null;
   coverage: Coverage | null;
   diagnostic: { code: string; message: string; affectedInputs: string[] } | null;
@@ -136,6 +136,7 @@ function InspectionNotice({ status }: { status: SessionStatus }) {
     <h2>{stateLabel[status.state]}{status.revision !== null ? ` · ${status.revision}` : ""}</h2>
     {status.state === "scanning" && <p>
       Page inventory: {progress.completed} / {progress.total ?? "unknown"} pages
+      {progress.verifying && ". Verifying frozen inputs before publication."}
     </p>}
     {coverage && <p>
       {coverage.reason === "complete" ? "Page inventory complete" : "Partial coverage"}: {coverage.evaluated} pages evaluated.
@@ -164,12 +165,12 @@ export function App() {
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     let cached: InspectionGraph | null = null;
+    let invalidated = false;
     async function poll() {
       try {
         const response = await fetch(base, { cache: "no-store", signal: abort.signal });
         if (!response.ok) throw new Error(`Inspection request failed (${response.status})`);
         let next: SessionStatus = await response.json();
-        let retained: Omit<InspectionGraph, "revision"> | null = null;
         if (next.state === "invalidated" || next.revision === null) cached = null;
         else if (cached?.revision !== next.revision) {
           const revision = await fetch(`${base}/revisions/${next.revision}`, { cache: "no-store", signal: abort.signal });
@@ -182,11 +183,23 @@ export function App() {
           }
         }
         if (next.state === "invalidated") {
-          const response = await fetch(`${base}/evidence`, { cache: "no-store", signal: abort.signal });
-          if (response.ok) retained = await response.json();
+          invalidated = true;
+          if (!abort.signal.aborted) {
+            setStatus(next); setGraph(null); setEvidence(null); setError(null);
+            // Retained evidence must never delay or mask known invalidation.
+            void fetch(`${base}/evidence`, { cache: "no-store", signal: abort.signal })
+              .then(async response => {
+                if (response.ok) {
+                  const retained: Omit<InspectionGraph, "revision"> = await response.json();
+                  if (!abort.signal.aborted) setEvidence(retained);
+                }
+              })
+              .catch(() => { /* The invalidation notice remains authoritative. */ });
+          }
+          return;
         }
         if (!abort.signal.aborted) {
-          setStatus(next); setGraph(cached); setEvidence(retained); setError(null);
+          setStatus(next); setGraph(cached); setError(null);
         }
       } catch (reason: unknown) {
         if (!abort.signal.aborted) {
@@ -194,7 +207,7 @@ export function App() {
           setError(reason instanceof Error ? reason.message : "Inspection request failed");
         }
       } finally {
-        if (!abort.signal.aborted) timer = setTimeout(poll, 500);
+        if (!abort.signal.aborted && !invalidated) timer = setTimeout(poll, 500);
       }
     }
     void poll();

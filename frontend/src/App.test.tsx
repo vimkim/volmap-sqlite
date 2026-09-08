@@ -23,7 +23,7 @@ const graph: InspectionGraph = {
 
 const published: SessionStatus = {
   snapshotId: "snapshot-fixture", source: graph.snapshot.source, state: "published",
-  progress: { unit: "pages", completed: 3, total: 3 }, revision: 1, coverage: graph.coverage, diagnostic: null,
+  progress: { unit: "pages", completed: 3, total: 3, verifying: false }, revision: 1, coverage: graph.coverage, diagnostic: null,
 };
 
 function respond(status: () => SessionStatus) {
@@ -55,7 +55,7 @@ describe("page atlas", () => {
 
   it("shows progress without a mosaic, then adopts only the published revision", async () => {
     let status: SessionStatus = { ...published, state: "scanning", revision: null, coverage: null,
-      progress: { unit: "pages", completed: 1, total: 3 } };
+      progress: { unit: "pages", completed: 1, total: 3, verifying: false } };
     respond(() => status);
     const { container } = render(<App />);
     expect(await screen.findByRole("heading", { name: "Scanning" })).toBeTruthy();
@@ -89,5 +89,21 @@ describe("page atlas", () => {
     await screen.findByRole("heading", { name: label });
     expect(screen.getByText(/Remaining: unknown/)).toBeTruthy();
     expect(container.querySelectorAll("[data-page-number]")).toHaveLength(0);
+  });
+
+  it.each(["pending", "failed"])("shows known invalidation even when evidence is %s", async outcome => {
+    let status = published;
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith("/evidence")) return outcome === "pending"
+        ? new Promise(() => {})
+        : Promise.reject(new Error("Evidence unavailable"));
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(url.endsWith("/revisions/1") ? graph : status) });
+    }));
+    const { container } = render(<App />);
+    await screen.findByRole("heading", { name: "Page atlas" });
+    status = { ...published, state: "invalidated", revision: null };
+    await screen.findByRole("heading", { name: "Snapshot invalidated" });
+    expect(container.querySelectorAll("[data-page-number]")).toHaveLength(0);
+    expect(screen.queryByText("Page atlas unavailable")).toBeNull();
   });
 });

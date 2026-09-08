@@ -2,6 +2,7 @@ use std::fs::{self, File, Metadata};
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
@@ -59,6 +60,7 @@ pub struct Progress {
     pub unit: &'static str,
     pub completed: u32,
     pub total: Option<u32>,
+    pub verifying: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -136,14 +138,27 @@ fn stamp(path: &Path) -> io::Result<Option<InputStamp>> {
 }
 
 struct Inputs {
-    paths: [(&'static str, PathBuf); 4],
-    accepted: Vec<Option<InputStamp>>,
+    accepted: Vec<AcceptedInput>,
     file: File,
     descriptor: Stamp,
-    digests: Vec<Option<[u8; 32]>>,
 }
 
-fn digest(path: &Path) -> io::Result<Option<[u8; 32]>> {
+struct AcceptedInput {
+    kind: &'static str,
+    path: PathBuf,
+    stamp: Option<InputStamp>,
+    digest: Option<[u8; 32]>,
+}
+
+impl AcceptedInput {
+    fn length(&self) -> u64 {
+        self.stamp
+            .as_ref()
+            .map_or(0, |stamp| stamp.target.as_ref().unwrap_or(&stamp.link).len)
+    }
+}
+
+fn digest(path: &Path, length: u64, cancelled: &AtomicBool) -> io::Result<Option<[u8; 32]>> {
     match fs::metadata(path) {
         Ok(metadata) if !metadata.is_file() => {
             return Err(io::Error::new(
@@ -155,7 +170,7 @@ fn digest(path: &Path) -> io::Result<Option<[u8; 32]>> {
         Err(error) => return Err(error),
         Ok(_) => {}
     }
-    let mut file = match File::open(path) {
+    let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -167,8 +182,16 @@ fn digest(path: &Path) -> io::Result<Option<[u8; 32]>> {
         ));
     }
     let mut hash = Sha256::new();
+    // Never chase a growing file's EOF. A later metadata comparison detects growth.
+    let mut file = file.take(length);
     let mut buffer = [0_u8; 16_384];
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "verification cancelled",
+            ));
+        }
         let read = match file.read(&mut buffer) {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             result => result?,
@@ -194,9 +217,16 @@ impl Inputs {
             ("journal", sidecar("-journal")),
             ("shm", sidecar("-shm")),
         ];
-        let accepted = paths
-            .iter()
-            .map(|(_, p)| stamp(p))
+        let mut accepted = paths
+            .into_iter()
+            .map(|(kind, path)| {
+                Ok(AcceptedInput {
+                    stamp: stamp(&path)?,
+                    kind,
+                    path,
+                    digest: None,
+                })
+            })
             .collect::<io::Result<Vec<_>>>()
             .map_err(InspectionError::Open)?;
         if !fs::metadata(path).map_err(InspectionError::Open)?.is_file() {
@@ -207,32 +237,28 @@ impl Inputs {
         }
         let file = File::open(path).map_err(InspectionError::Open)?;
         let descriptor = file.metadata().map_err(InspectionError::Open)?.into();
-        let digests = paths
-            .iter()
-            .map(|(_, p)| digest(p))
-            .collect::<io::Result<Vec<_>>>()
-            .map_err(InspectionError::Open)?;
+        for input in &mut accepted {
+            input.digest = digest(&input.path, input.length(), &AtomicBool::new(false))
+                .map_err(InspectionError::Open)?;
+        }
         let inputs = Self {
-            paths,
             accepted,
             file,
             descriptor,
-            digests,
         };
-        if !inputs.changes(false).is_empty() {
+        if !inputs.changes().is_empty() {
             return Err(InspectionError::Invalidated);
         }
         Ok(inputs)
     }
 
-    fn changes(&self, verify_content: bool) -> Vec<&'static str> {
+    fn changes(&self) -> Vec<&'static str> {
         let mut changes: Vec<_> = self
-            .paths
+            .accepted
             .iter()
-            .zip(&self.accepted)
-            .filter_map(|((name, path), accepted)| match stamp(path) {
-                Ok(current) if &current == accepted => None,
-                _ => Some(*name),
+            .filter_map(|input| match stamp(&input.path) {
+                Ok(current) if current == input.stamp => None,
+                _ => Some(input.kind),
             })
             .collect();
         let descriptor_matches = self
@@ -240,32 +266,45 @@ impl Inputs {
             .metadata()
             .is_ok_and(|m| Stamp::from(m) == self.descriptor);
         let accepted_matches = self.accepted[0]
+            .stamp
             .as_ref()
             .is_some_and(|s| s.target.as_ref().unwrap_or(&s.link) == &self.descriptor);
         if (!descriptor_matches || !accepted_matches) && !changes.contains(&"main") {
             changes.push("main");
         }
-        if verify_content {
-            for ((name, path), accepted) in self.paths.iter().zip(&self.digests) {
-                if !digest(path).is_ok_and(|current| &current == accepted)
-                    && !changes.contains(name)
+        changes
+    }
+
+    fn verify(&self, cancelled: &AtomicBool) -> Result<Vec<&'static str>, InspectionError> {
+        let mut changes = self.changes();
+        if changes.is_empty() {
+            for input in &self.accepted {
+                let result = digest(&input.path, input.length(), cancelled);
+                if result
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == io::ErrorKind::Interrupted)
                 {
-                    changes.push(name);
+                    return Err(InspectionError::NotScanning);
+                }
+                if !result.is_ok_and(|current| current == input.digest)
+                    && !changes.contains(&input.kind)
+                {
+                    changes.push(input.kind);
                 }
             }
             // Catch replacement or writes that occur while the streaming digest is read.
-            for name in self.changes(false) {
+            for name in self.changes() {
                 if !changes.contains(&name) {
                     changes.push(name);
                 }
             }
         }
-        changes
+        Ok(changes)
     }
 }
 
 struct SessionData {
-    inputs: Inputs,
+    inputs: Arc<Inputs>,
     status: SessionStatus,
     snapshot: Option<DatabaseSnapshot>,
     pages: Vec<PageEntity>,
@@ -288,21 +327,25 @@ impl SessionData {
         }
     }
 
-    fn validate(&mut self, verify_content: bool) -> bool {
+    fn validate(&mut self) -> bool {
         if self.status.state == SessionState::Invalidated {
             return false;
         }
-        let changes = self.inputs.changes(verify_content);
+        let changes = self.inputs.changes();
         if changes.is_empty() {
             return true;
         }
+        self.invalidate(changes);
+        false
+    }
+
+    fn invalidate(&mut self, changes: Vec<&'static str>) {
         self.status.state = SessionState::Invalidated;
         self.status.revision = None;
         self.status.coverage = Some(self.coverage(CoverageReason::InputChanged));
         self.status.diagnostic = Some(Diagnostic { code: "input_changed",
             message: "Accepted input changed; retained observations are diagnostic evidence, not a coherent snapshot.".into(),
             affected_inputs: changes });
-        false
     }
 
     fn publish(&mut self, state: SessionState, reason: CoverageReason) {
@@ -324,6 +367,16 @@ impl SessionData {
 /// Owns accepted input handles and publishes only immutable, validated revisions.
 pub struct InspectionSession {
     data: Mutex<SessionData>,
+    active_checks: AtomicUsize,
+    cancel_verification: AtomicBool,
+}
+
+struct ActiveCheck<'a>(&'a AtomicUsize);
+
+impl Drop for ActiveCheck<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl std::fmt::Debug for InspectionSession {
@@ -340,8 +393,10 @@ impl InspectionSession {
     /// Returns an input-access or invalidation error if acceptance cannot establish a stable input set.
     pub fn begin(path: &Path) -> Result<Self, InspectionError> {
         Ok(Self {
+            active_checks: AtomicUsize::new(0),
+            cancel_verification: AtomicBool::new(false),
             data: Mutex::new(SessionData {
-                inputs: Inputs::accept(path)?,
+                inputs: Arc::new(Inputs::accept(path)?),
                 status: SessionStatus {
                     snapshot_id: Uuid::new_v4().to_string(),
                     source: SourceIdentity {
@@ -353,6 +408,7 @@ impl InspectionSession {
                         unit: "pages",
                         completed: 0,
                         total: None,
+                        verifying: false,
                     },
                     revision: None,
                     coverage: None,
@@ -380,13 +436,51 @@ impl InspectionSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    // Expensive reads run outside the state mutex. A stop can abort between buffers.
+    fn verify(&self, checkpoint: impl FnOnce()) -> Result<(), InspectionError> {
+        let inputs = {
+            let mut d = self.lock();
+            if !d.validate() {
+                return Err(InspectionError::Invalidated);
+            }
+            self.active_checks.fetch_add(1, Ordering::AcqRel);
+            Arc::clone(&d.inputs)
+        };
+        let _active = ActiveCheck(&self.active_checks);
+        checkpoint();
+        let result = inputs.verify(&self.cancel_verification);
+        let changes = result?;
+        let mut d = self.lock();
+        if !changes.is_empty() {
+            d.invalidate(changes);
+        }
+        if !d.validate() {
+            return Err(InspectionError::Invalidated);
+        }
+        Ok(())
+    }
+
+    fn finish(&self, state: SessionState, reason: CoverageReason) -> Result<(), InspectionError> {
+        self.verify(|| {})?;
+        let mut d = self.lock();
+        if !d.validate() {
+            return Err(InspectionError::Invalidated);
+        }
+        if d.status.state != SessionState::Scanning {
+            return Err(InspectionError::NotScanning);
+        }
+        d.publish(state, reason);
+        Ok(())
+    }
+
     /// Observes progress independently of a navigable graph and rechecks accepted inputs.
     #[must_use]
     pub fn status(&self) -> SessionStatus {
         let mut data = self.lock();
-        let terminal = data.status.state != SessionState::Scanning;
-        data.validate(terminal);
-        data.status.clone()
+        data.validate();
+        let mut status = data.status.clone();
+        status.progress.verifying = self.active_checks.load(Ordering::Acquire) > 0;
+        status
     }
 
     /// Runs one bounded inventory unit. Publication itself is a separate, validated boundary.
@@ -394,7 +488,7 @@ impl InspectionSession {
     /// Returns an error for invalid geometry, changed inputs, or work requested after a terminal state.
     pub fn advance(&self) -> Result<(), InspectionError> {
         let mut d = self.lock();
-        if !d.validate(false) {
+        if !d.validate() {
             return Err(InspectionError::Invalidated);
         }
         if d.status.state != SessionState::Scanning {
@@ -406,7 +500,7 @@ impl InspectionSession {
                 &d.status.snapshot_id,
                 d.status.source.clone(),
             );
-            if !d.validate(false) {
+            if !d.validate() {
                 return Err(InspectionError::Invalidated);
             }
             match result {
@@ -426,22 +520,17 @@ impl InspectionSession {
                 }
             }
         } else if Some(d.status.progress.completed) == d.status.progress.total {
-            if !d.validate(true) {
-                return Err(InspectionError::Invalidated);
-            }
-            d.publish(SessionState::Published, CoverageReason::Complete);
+            drop(d);
+            self.finish(SessionState::Published, CoverageReason::Complete)?;
         } else {
             if d.pages.try_reserve(1).is_err() {
-                if !d.validate(true) {
-                    return Err(InspectionError::Invalidated);
-                }
-                d.publish(SessionState::Stopped, CoverageReason::AllocationFailure);
-                return Ok(());
+                drop(d);
+                return self.finish(SessionState::Stopped, CoverageReason::AllocationFailure);
             }
             let number = d.status.progress.completed + 1;
             d.pages.push(PageEntity { number });
             d.status.progress.completed = number;
-            if !d.validate(false) {
+            if !d.validate() {
                 return Err(InspectionError::Invalidated);
             }
         }
@@ -472,6 +561,33 @@ impl InspectionSession {
                 return Ok(());
             }
             match observe(&status) {
+                ScanControl::Continue
+                    if status.progress.total == Some(status.progress.completed) =>
+                {
+                    let result = self.verify(|| {
+                        let control = observe(&self.status());
+                        if control != ScanControl::Continue {
+                            let _ = self.stop(control);
+                        }
+                    });
+                    if let Err(error) = result {
+                        return if self.status().state == SessionState::Cancelled
+                            || self.status().state == SessionState::Stopped
+                        {
+                            Ok(())
+                        } else {
+                            Err(error)
+                        };
+                    }
+                    let mut d = self.lock();
+                    if !d.validate() {
+                        return Err(InspectionError::Invalidated);
+                    }
+                    if d.status.state == SessionState::Scanning {
+                        d.publish(SessionState::Published, CoverageReason::Complete);
+                    }
+                    return Ok(());
+                }
                 ScanControl::Continue => self.advance()?,
                 control => {
                     self.stop(control)?;
@@ -486,18 +602,26 @@ impl InspectionSession {
     /// Rejects changed inputs and terminal sessions.
     pub fn stop(&self, control: ScanControl) -> Result<(), InspectionError> {
         let mut d = self.lock();
-        if !d.validate(true) {
+        if !d.validate() {
             return Err(InspectionError::Invalidated);
         }
         if d.status.state != SessionState::Scanning {
             return Err(InspectionError::NotScanning);
         }
-        match control {
-            ScanControl::Continue => {}
-            ScanControl::Cancel => d.publish(SessionState::Cancelled, CoverageReason::Cancelled),
-            ScanControl::Stop => d.publish(SessionState::Stopped, CoverageReason::OperatorStop),
+        let (state, reason) = match control {
+            ScanControl::Continue => return Ok(()),
+            ScanControl::Cancel => (SessionState::Cancelled, CoverageReason::Cancelled),
+            ScanControl::Stop => (SessionState::Stopped, CoverageReason::OperatorStop),
+        };
+        if self.active_checks.load(Ordering::Acquire) > 0 {
+            self.cancel_verification.store(true, Ordering::Release);
+            d.status.state = state;
+            d.status.coverage = Some(d.coverage(reason));
+            // Integrity was not established, so this stop has no navigable revision.
+            return Ok(());
         }
-        Ok(())
+        drop(d);
+        self.finish(state, reason)
     }
 
     /// Resolves a published revision after validating input stability. This is also the
@@ -505,9 +629,18 @@ impl InspectionSession {
     /// # Errors
     /// Rejects invalidated snapshots, unpublished graphs and unknown revisions.
     pub fn revision(&self, revision: u64) -> Result<Arc<InspectionGraph>, InspectionError> {
+        {
+            let mut d = self.lock();
+            if !d.validate() {
+                return Err(InspectionError::Invalidated);
+            }
+            if d.published.as_ref().is_none_or(|r| r.revision != revision) {
+                return Err(InspectionError::RevisionUnavailable);
+            }
+        }
+        self.verify(|| {})?;
         let mut d = self.lock();
-        let published = d.published.is_some();
-        if !d.validate(published) {
+        if !d.validate() {
             return Err(InspectionError::Invalidated);
         }
         d.published
@@ -528,7 +661,7 @@ impl InspectionSession {
     #[must_use]
     pub fn evidence(&self) -> Option<ObservedEvidence> {
         let mut d = self.lock();
-        d.validate(true);
+        d.validate();
         if d.status.state != SessionState::Invalidated {
             return None;
         }

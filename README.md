@@ -22,8 +22,10 @@ The session fingerprints the main file and adjacent `-wal`, `-journal`, and `-sh
 set. It compares device/inode, size, modification/change timestamps and file mode.
 Streaming SHA-256 fingerprints also detect content differences when filesystem
 timestamps have insufficient resolution. Hashes stay private and use a fixed 16 KiB
-read buffer. Acceptance and terminal validation read all accepted input bytes; this
-currently adds I/O, including when the browser revalidates a published session.
+read buffer. Acceptance, publication and revision retrieval verify input contents;
+lightweight status queries compare metadata. Content verification reads at most the
+captured file lengths, runs outside the session mutex, and can be interrupted by a stop.
+An interrupted integrity check cannot publish a revision. Content checks currently add I/O.
 These checks detect changes; they do not acquire an atomic live-database snapshot.
 Supply a stopped database or stable copy. Sidecar bytes are never applied.
 

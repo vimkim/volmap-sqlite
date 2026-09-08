@@ -65,12 +65,14 @@ async fn revision(
     if id != session.status().snapshot_id {
         return StatusCode::NOT_FOUND.into_response();
     }
-    match session.revision(number) {
-        Ok(graph) => Json(&*graph).into_response(),
-        Err(InspectionError::Invalidated) => {
+    let worker_session = Arc::clone(&session);
+    match tokio::task::spawn_blocking(move || worker_session.revision(number)).await {
+        Ok(Ok(graph)) => Json(&*graph).into_response(),
+        Ok(Err(InspectionError::Invalidated)) => {
             (StatusCode::CONFLICT, Json(session.status())).into_response()
         }
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(_)) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -91,9 +93,11 @@ async fn cancel(Path(id): Path<String>, State(session): State<Arc<InspectionSess
     if id != session.status().snapshot_id {
         return StatusCode::NOT_FOUND.into_response();
     }
-    match session.stop(ScanControl::Cancel) {
-        Ok(()) => Json(session.status()).into_response(),
-        Err(_) => (StatusCode::CONFLICT, Json(session.status())).into_response(),
+    let worker_session = Arc::clone(&session);
+    match tokio::task::spawn_blocking(move || worker_session.stop(ScanControl::Cancel)).await {
+        Ok(Ok(())) => Json(session.status()).into_response(),
+        Ok(Err(_)) => (StatusCode::CONFLICT, Json(session.status())).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
