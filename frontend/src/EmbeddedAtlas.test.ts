@@ -22,7 +22,7 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
           textEncoding: "utf8",
         },
       },
-      pages: [{ number: 1 }, { number: 2 }],
+      pages: [1, 2].map(number => ({ number, detail: { kind: null, coverage: "unsupported", header: null, regions: [], cells: [], freeblocks: [], diagnostics: [] } })),
     } : {
       snapshotId: "embedded-snapshot", source: { id: "embedded-source", displayName: "embedded.sqlite" },
       state: "published", revision: 1, progress: { unit: "pages", completed: 2, total: 2 },

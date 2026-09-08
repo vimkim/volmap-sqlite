@@ -1,8 +1,10 @@
 # Volmap SQLite Inspector
 
 Read-only inspection of a frozen SQLite main-file image. The current implementation
-publishes geometry and page inventory; B-tree structure, roles, and application values
-are not inspected yet.
+publishes geometry, page inventory, and local table/index B-tree structural evidence.
+Select a page for its byte map, header, cell-pointer inventory, cell extents, record
+serial types, rowids, and supported freeblock/fragment layout. Application values
+and raw payload bytes are never included in these responses.
 
 Build the embedded browser assets, then run the standalone binary:
 
@@ -41,6 +43,25 @@ The browser API separates session status from immutable revisions:
 Page inventory coverage reports evaluated pages, trusted total when known, the next
 uninspected page, remaining pages, and the completion or stop reason. A complete page
 inventory does not imply that the full structural inspection has been implemented.
+
+Each page carries separate local B-tree coverage (`complete`, `partial`, or
+`unsupported`). Header recognition is a local role claim, not global role attribution.
+Malformed boundaries carry diagnostics and stop dependent interpretation while
+independent cells and page evidence remain available. Conflicting allocations have
+no validated extent or dependent record facts. Child/overflow page numbers are
+untraversed claims; record headers extending beyond local payload report
+`needs_overflow`. Topology, overflow traversal, and global role reconciliation are
+later work. Index keys are not decoded as application values.
+
+The parser follows the [SQLite file format](https://www.sqlite.org/fileformat.html),
+including its local-payload formulas. It reads one bounded page at a time, retains
+structural facts rather than page buffers, and treats reserved bytes as opaque.
+Ranges use zero-based `[start, end)` coordinates in both the containing page and
+main file. Page 1 separates its 100-byte database header from the B-tree header.
+Cell identity is snapshot-scoped `(page number, zero-based pointer-array index)`;
+rowids and serial types use decimal strings to avoid JavaScript integer rounding.
+Page detail is embedded in the immutable graph, so selecting a page does not read
+or reinterpret database bytes through a separate UI path.
 
 Verification:
 

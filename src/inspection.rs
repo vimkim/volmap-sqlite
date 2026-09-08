@@ -6,7 +6,9 @@ use std::path::Path;
 use serde::Serialize;
 use thiserror::Error;
 
+mod btree;
 mod session;
+pub use btree::{ByteRange, CellDetail, CellIdentity, PageDetail};
 pub use session::{
     Coverage, CoverageReason, InspectionSession, Progress, ScanControl, SessionState, SessionStatus,
 };
@@ -83,10 +85,11 @@ pub struct DatabaseSnapshot {
     pub geometry: DatabaseGeometry,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageEntity {
     pub number: u32,
+    pub detail: PageDetail,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

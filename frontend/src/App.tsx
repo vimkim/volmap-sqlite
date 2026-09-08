@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PageDetail, roleLabel, type PageEvidence } from "./PageDetail";
 
 type TextEncoding = "utf8" | "utf16_le" | "utf16_be";
 
@@ -16,7 +17,7 @@ export interface InspectionGraph {
       textEncoding: TextEncoding;
     };
   };
-  pages: Array<{ number: number }>;
+  pages: Array<{ number: number; detail: PageEvidence }>;
 }
 
 interface Coverage {
@@ -53,6 +54,7 @@ const encodingLabel: Record<TextEncoding, string> = {
 function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatus }) {
   const { geometry, source } = graph.snapshot;
   const [selectedPage, setSelectedPage] = useState(1);
+  const active = graph.pages.find(page => page.number === selectedPage);
 
   return (
     <main className="workspace">
@@ -91,12 +93,16 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
               <button
                 className={page.number === selectedPage ? "page selected" : "page"}
                 data-page-number={page.number}
+                data-role={page.detail.kind ?? "unknown"}
+                aria-pressed={page.number === selectedPage}
                 key={page.number}
                 onClick={() => setSelectedPage(page.number)}
                 type="button"
               >
                 <span>Page</span>
                 <strong>{page.number}</strong>
+                <span>{roleLabel(page.detail.kind)}</span>
+                {page.detail.coverage === "partial" && <span>Partial</span>}
               </button>
             ))}
           </div>
@@ -109,14 +115,15 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
           <dl>
             <div><dt>Identity</dt><dd>page:{selectedPage}</dd></div>
             <div><dt>Byte range</dt><dd>{((selectedPage - 1) * geometry.pageSize).toLocaleString()}–{(selectedPage * geometry.pageSize - 1).toLocaleString()}</dd></div>
-            <div><dt>Role</dt><dd className="unknown">Not inspected</dd></div>
+            <div><dt>Role claim</dt><dd>{active ? roleLabel(active.detail.kind) : "Unknown"}</dd></div>
           </dl>
           </>}
           <p className="evidence-note">
-            Coverage includes page inventory only. B-tree structure, page roles, and application values have not been inspected.
+            Select a page to inspect its structural map and physical cell inventory below. Global role attribution is not yet evaluated.
           </p>
         </aside>
       </div>
+      {active && <PageDetail detail={active.detail} pageSize={geometry.pageSize} />}
     </main>
   );
 }

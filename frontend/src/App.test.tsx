@@ -18,7 +18,15 @@ const graph: InspectionGraph = {
       textEncoding: "utf8",
     },
   },
-  pages: [{ number: 1 }, { number: 2 }, { number: 3 }],
+  pages: [1, 2, 3].map(number => ({ number, detail: {
+    kind: "table_leaf", coverage: "complete", diagnostics: [], freeblocks: [],
+    header: { range: { pageOffset: 0, fileOffset: (number - 1) * 4096, length: 8 }, firstFreeblock: 0, cellCount: 1, contentStart: 4076, fragmentedBytes: 0, rightmostChild: null },
+    regions: [{ kind: "cell_content", range: { pageOffset: 4076, fileOffset: (number - 1) * 4096 + 4076, length: 4 } }],
+    cells: [{ identity: { pageNumber: number, index: 0 }, pointer: { pageOffset: 8, fileOffset: (number - 1) * 4096 + 8, length: 2 }, offset: 4076,
+      range: { pageOffset: 4076, fileOffset: (number - 1) * 4096 + 4076, length: 4 }, rowid: "99", leftChild: null,
+      payloadSize: 2, localPayload: { pageOffset: 4078, fileOffset: (number - 1) * 4096 + 4078, length: 2 }, overflowPage: null,
+      record: { state: "complete", headerSize: 2, serialTypes: ["8"] }, diagnostic: null }],
+  } })),
 };
 
 const published: SessionStatus = {
@@ -51,6 +59,11 @@ describe("page atlas", () => {
 
     fireEvent.click(container.querySelector('[data-page-number="3"]')!);
     await waitFor(() => expect(screen.getByRole("heading", { name: "Page 3" })).toBeTruthy());
+    expect(screen.getByRole("region", { name: "Structural byte map" })).toBeTruthy();
+    expect(screen.getByText("cell:3:0")).toBeTruthy();
+    expect(screen.queryByText("cell:1:0")).toBeNull();
+    expect(screen.getByText("99")).toBeTruthy();
+    expect(screen.getByRole("table", { name: "Cell inventory" })).toBeTruthy();
   });
 
   it("shows progress without a mosaic, then adopts only the published revision", async () => {
@@ -63,6 +76,23 @@ describe("page atlas", () => {
     status = published;
     expect(await screen.findByRole("heading", { name: "Published revision · 1" })).toBeTruthy();
     expect(container.querySelectorAll("[data-page-number]")).toHaveLength(3);
+  });
+
+  it("labels damaged structure without hiding independent page evidence", async () => {
+    const damaged: InspectionGraph = { ...graph, pages: [{ ...graph.pages[0], detail: {
+      ...graph.pages[0].detail, coverage: "partial", diagnostics: ["invalid_freeblock_link"],
+      cells: [{ ...graph.pages[0].detail.cells[0], range: null, rowid: null, record: null, diagnostic: "invalid_cell_pointer" }],
+    } }] };
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve({
+      ok: true, json: () => Promise.resolve(url.endsWith("/revisions/1") ? damaged : published),
+    })));
+    render(<App />);
+    expect(await screen.findByText("Local B-tree coverage: partial")).toBeTruthy();
+    expect(screen.getByText("invalid freeblock link")).toBeTruthy();
+    expect(screen.getByText("invalid cell pointer")).toBeTruthy();
+    expect(screen.getByText("cell:1:0")).toBeTruthy();
+    expect(screen.queryByText("99")).toBeNull();
+    expect(screen.getByRole("table", { name: "Byte regions" })).toBeTruthy();
   });
 
   it("removes navigation when a published snapshot becomes invalidated and labels retained evidence", async () => {

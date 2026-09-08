@@ -528,7 +528,13 @@ impl InspectionSession {
                 return self.finish(SessionState::Stopped, CoverageReason::AllocationFailure);
             }
             let number = d.status.progress.completed + 1;
-            d.pages.push(PageEntity { number });
+            let geometry = &d
+                .snapshot
+                .as_ref()
+                .ok_or(InspectionError::NotScanning)?
+                .geometry;
+            let detail = super::btree::read_page(&d.inputs.file, number, geometry);
+            d.pages.push(PageEntity { number, detail });
             d.status.progress.completed = number;
             if !d.validate() {
                 return Err(InspectionError::Invalidated);

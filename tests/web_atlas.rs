@@ -51,6 +51,15 @@ async fn serves_the_real_graph_and_embedded_atlas_without_disclosing_its_path() 
     let api_body = response_body(api_response).await;
     assert!(api_body.contains("\"pageCount\":3"));
     assert!(api_body.contains("\"number\":3"));
+    let graph: serde_json::Value = serde_json::from_str(&api_body).unwrap();
+    let table = &graph["pages"][1]["detail"];
+    assert_eq!(table["kind"], "table_leaf");
+    assert_eq!(table["cells"][0]["identity"]["pageNumber"], 2);
+    assert_eq!(
+        table["cells"][0]["record"]["serialTypes"],
+        serde_json::json!(["39", "1"])
+    );
+    assert_eq!(graph["pages"][2]["detail"]["kind"], "index_leaf");
     assert!(!api_body.contains("fixture-value"));
     assert!(!api_body.contains(directory.path().to_string_lossy().as_ref()));
 
