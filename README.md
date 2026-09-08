@@ -14,6 +14,14 @@ npm --prefix frontend run build
 cargo run --locked -- /path/to/frozen.sqlite
 ```
 
+Per-path topology ceilings are configurable with `--max-btree-pages` and
+`--max-overflow-pages`; the shared aggregate prefix-allocation ceiling is
+`--max-total-traversal-pages`. The B-tree and aggregate ceilings must be at least
+one; an overflow ceiling of zero records the first unfollowed link. Their effective
+values and topology completion, budget, or cancellation reason are disclosed in the
+published graph and browser geometry panel. The aggregate `u64` ceiling is encoded as
+a decimal string in JSON so browsers disclose it without precision loss.
+
 Open the printed loopback URL. The browser shows scan progress until revision 1 is
 published. Cancellation publishes the evaluated prefix with explicit partial coverage;
 cancellation before geometry has no navigable revision. Invalid geometry produces a
@@ -48,10 +56,20 @@ Each page carries separate local B-tree coverage (`complete`, `partial`, or
 `unsupported`). Header recognition is a local role claim, not global role attribution.
 Malformed boundaries carry diagnostics and stop dependent interpretation while
 independent cells and page evidence remain available. Conflicting allocations have
-no validated extent or dependent record facts. Child/overflow page numbers are
-untraversed claims; record headers extending beyond local payload report
-`needs_overflow`. Topology, overflow traversal, and global role reconciliation are
-later work. Index keys are not decoded as application values.
+no validated extent or dependent record facts. Record headers extending beyond local
+payload report `needs_overflow`. Index keys are not decoded as application values.
+
+The published graph separately records source-backed B-tree child and overflow
+relationship claims, validated relationships, root- or cell-scoped traversal prefixes,
+structured diagnostics, effective traversal ceilings, and topology coverage. Pointer evidence includes page-relative and main-file byte
+coordinates plus a named SQLite validation rule. Missing targets retain their intended
+page number without creating a page entity. Type conflicts, duplicate parents or
+overflow, cycles, overlapping claim sources, broken overflow links, and incompatible
+overflow ownership stop only the affected traversal. The browser follows validated
+links in either direction and jumps from relationship diagnostics to their evidence
+page and byte. Overflow traversal reads only the four-byte linkage fields and never
+adds overflow payload bytes to the broad graph. Global page-role reconciliation remains
+later work.
 
 The parser follows the [SQLite file format](https://www.sqlite.org/fileformat.html),
 including its local-payload formulas. It reads one bounded page at a time, retains

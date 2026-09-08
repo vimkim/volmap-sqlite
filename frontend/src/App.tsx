@@ -1,7 +1,11 @@
-import { useEffect, useState } from "react";
-import { PageDetail, roleLabel, type PageEvidence } from "./PageDetail";
+import { useEffect, useMemo, useState } from "react";
+import {
+  PageDetail, roleLabel, type PageEvidence, type PhysicalEvidence, type Relationship,
+  type RelationshipClaim, type StructuralDiagnostic,
+} from "./PageDetail";
 
 type TextEncoding = "utf8" | "utf16_le" | "utf16_be";
+type TopologyPhase = "btree_claim_collection" | "btree_claim_validation" | "btree_parent_reconciliation" | "btree_cycle_reconciliation" | "btree_relationship_normalization" | "btree_traversal" | "overflow_inspection" | "overflow_reconciliation" | "overflow_relationship_normalization" | "complete";
 
 export interface InspectionGraph {
   revision: number;
@@ -18,6 +22,29 @@ export interface InspectionGraph {
     };
   };
   pages: Array<{ number: number; detail: PageEvidence }>;
+  relationshipClaims: RelationshipClaim[];
+  relationships: Relationship[];
+  traversals: Array<{
+    kind: "btree" | "overflow";
+    origin: { type: "page" | "cell"; pageNumber: number; cellIndex?: number };
+    validatedPrefix: Array<{ pageNumber: number }>;
+    stop: {
+      reason: "missing_target" | "out_of_range" | "coverage_stop" | "invalid_reference" | "type_mismatch" | "cycle" | "conflicting_claim" | "overlapping_extent" | "budget" | "cancelled" | "operator_stop";
+      claimId: string;
+      intendedTarget: { pageNumber: number } | null;
+    } | null;
+  }>;
+  diagnostics: StructuralDiagnostic[];
+  topologyCoverage: {
+    reason: "complete" | "budget" | "cancelled" | "operator_stop";
+    phase: TopologyPhase;
+    evaluated: number;
+    total: number | null;
+    next: number | null;
+    remainder: number | null;
+    nextPhase: TopologyPhase | null;
+    traversalBudget: { maxBtreePages: number; maxOverflowPages: number; maxTotalPages: string };
+  };
 }
 
 interface Coverage {
@@ -33,7 +60,7 @@ export interface SessionStatus {
   snapshotId: string;
   source: { id: string; displayName: string };
   state: "scanning" | "published" | "cancelled" | "stopped" | "invalidated" | "fatal";
-  progress: { unit: "pages"; completed: number; total: number | null; verifying: boolean };
+  progress: { unit: "pages"; completed: number; total: number | null; verifying: boolean; buildingTopology: boolean };
   revision: number | null;
   coverage: Coverage | null;
   diagnostic: { code: string; message: string; affectedInputs: string[] } | null;
@@ -54,7 +81,34 @@ const encodingLabel: Record<TextEncoding, string> = {
 function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatus }) {
   const { geometry, source } = graph.snapshot;
   const [selectedPage, setSelectedPage] = useState(1);
-  const active = graph.pages.find(page => page.number === selectedPage);
+  const [evidenceLocus, setEvidenceLocus] = useState<PhysicalEvidence | null>(null);
+  const projection = useMemo(() => {
+    const pagesByNumber = new Map(graph.pages.map(page => [page.number, page]));
+    const claimsByPage = new Map<number, RelationshipClaim[]>();
+    for (const claim of graph.relationshipClaims) {
+      const source = claim.source.pageNumber;
+      const touched = claim.target?.pageNumber === source
+        ? [source]
+        : [source, claim.target?.pageNumber].filter((page): page is number => page !== undefined);
+      for (const page of touched) {
+        const claims = claimsByPage.get(page);
+        if (claims) claims.push(claim);
+        else claimsByPage.set(page, [claim]);
+      }
+    }
+    return {
+      pagesByNumber,
+      claimsByPage,
+      relationshipsByClaim: new Map(
+        graph.relationships.map(relationship => [relationship.claimId, relationship]),
+      ),
+    };
+  }, [graph.pages, graph.relationshipClaims, graph.relationships]);
+  const active = projection.pagesByNumber.get(selectedPage);
+  const selectPage = (page: number) => {
+    setSelectedPage(page);
+    setEvidenceLocus(null);
+  };
 
   return (
     <main className="workspace">
@@ -77,6 +131,18 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
         <GeometryFact label="Usable size" value={`${geometry.usableSize.toLocaleString()} B`} />
         <GeometryFact label="Reserved" value={`${geometry.reservedBytes} B`} />
         <GeometryFact label="Encoding" value={encodingLabel[geometry.textEncoding]} />
+        <GeometryFact label="Topology coverage" value={graph.topologyCoverage.reason} />
+        <GeometryFact label="Topology phase" value={graph.topologyCoverage.phase.replaceAll("_", " ")} />
+        <GeometryFact
+          label="Topology phase progress"
+          value={`${graph.topologyCoverage.evaluated.toLocaleString()} / ${graph.topologyCoverage.total?.toLocaleString() ?? "unknown"} work units`}
+        />
+        <GeometryFact label="Topology next unit" value={graph.topologyCoverage.next?.toLocaleString() ?? "none"} />
+        <GeometryFact label="Topology remainder" value={graph.topologyCoverage.remainder?.toLocaleString() ?? "unknown"} />
+        <GeometryFact label="Topology next phase" value={graph.topologyCoverage.nextPhase?.replaceAll("_", " ") ?? "none"} />
+        <GeometryFact label="B-tree path limit" value={graph.topologyCoverage.traversalBudget.maxBtreePages.toLocaleString()} />
+        <GeometryFact label="Overflow path limit" value={graph.topologyCoverage.traversalBudget.maxOverflowPages.toLocaleString()} />
+        <GeometryFact label="Aggregate traversal limit" value={BigInt(graph.topologyCoverage.traversalBudget.maxTotalPages).toLocaleString()} />
       </section>
 
       <div className="content-grid">
@@ -96,7 +162,7 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
                 data-role={page.detail.kind ?? "unknown"}
                 aria-pressed={page.number === selectedPage}
                 key={page.number}
-                onClick={() => setSelectedPage(page.number)}
+                onClick={() => selectPage(page.number)}
                 type="button"
               >
                 <span>Page</span>
@@ -123,7 +189,35 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
           </p>
         </aside>
       </div>
-      {active && <PageDetail detail={active.detail} pageSize={geometry.pageSize} />}
+      {graph.diagnostics.length > 0 && <section className="relationship-diagnostics" aria-label="Relationship diagnostics">
+        <div className="section-heading"><h2>Relationship diagnostics</h2><span>{graph.diagnostics.length}</span></div>
+        <ul>{graph.diagnostics.map((diagnostic, index) => {
+          return <li key={`${diagnostic.code}:${index}`}>
+            <strong>{diagnostic.code.replaceAll("_", " ")}</strong>
+            <span>{diagnostic.severity} · {diagnostic.containment.replaceAll("_", " ")}</span>
+            {diagnostic.evidence.map((evidence, evidenceIndex) => <button
+              key={`${evidence.page.pageNumber}:${evidence.range.pageOffset}:${evidenceIndex}`}
+              type="button"
+              aria-label={`Jump to page ${evidence.page.pageNumber} byte ${evidence.range.pageOffset}`}
+              onClick={() => {
+                setSelectedPage(evidence.page.pageNumber);
+                setEvidenceLocus(evidence);
+              }}
+            >
+              Jump to page {evidence.page.pageNumber}, byte {evidence.range.pageOffset}
+            </button>)}
+          </li>;
+        })}</ul>
+      </section>}
+      {active && <PageDetail
+        detail={active.detail}
+        pageSize={geometry.pageSize}
+        pageNumber={active.number}
+        claims={projection.claimsByPage.get(active.number) ?? []}
+        relationshipsByClaim={projection.relationshipsByClaim}
+        onSelectPage={selectPage}
+        evidenceByte={evidenceLocus?.page.pageNumber === active.number ? evidenceLocus.range.pageOffset : null}
+      />}
     </main>
   );
 }
@@ -144,6 +238,7 @@ function InspectionNotice({ status }: { status: SessionStatus }) {
     {status.state === "scanning" && <p>
       Page inventory: {progress.completed} / {progress.total ?? "unknown"} pages
       {progress.verifying && ". Verifying frozen inputs before publication."}
+      {progress.buildingTopology && ". Building bounded relationship topology."}
     </p>}
     {coverage && <p>
       {coverage.reason === "complete" ? "Page inventory complete" : "Partial coverage"}: {coverage.evaluated} pages evaluated.

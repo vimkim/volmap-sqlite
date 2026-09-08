@@ -225,6 +225,11 @@ fn published_readers_keep_an_immutable_revision_after_invalidation() {
         revision.snapshot.id
     );
     assert_eq!(session.evidence().unwrap().pages, revision.pages);
+    let evidence = session.evidence().unwrap();
+    assert_eq!(evidence.relationship_claims, revision.relationship_claims);
+    assert_eq!(evidence.relationships, revision.relationships);
+    assert_eq!(evidence.traversals, revision.traversals);
+    assert_eq!(evidence.diagnostics, revision.diagnostics);
 }
 
 #[test]

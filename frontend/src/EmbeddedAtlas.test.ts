@@ -23,6 +23,11 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
         },
       },
       pages: [1, 2].map(number => ({ number, detail: { kind: null, coverage: "unsupported", header: null, regions: [], cells: [], freeblocks: [], diagnostics: [] } })),
+      relationshipClaims: [], relationships: [], traversals: [], diagnostics: [],
+      topologyCoverage: {
+        reason: "complete", phase: "complete", evaluated: 0, total: 0, next: null, remainder: 0, nextPhase: null,
+        traversalBudget: { maxBtreePages: 1000, maxOverflowPages: 1000, maxTotalPages: "10000" },
+      },
     } : {
       snapshotId: "embedded-snapshot", source: { id: "embedded-source", displayName: "embedded.sqlite" },
       state: "published", revision: 1, progress: { unit: "pages", completed: 2, total: 2 },

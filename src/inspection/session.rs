@@ -61,6 +61,7 @@ pub struct Progress {
     pub completed: u32,
     pub total: Option<u32>,
     pub verifying: bool,
+    pub building_topology: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -85,10 +86,16 @@ pub struct Diagnostic {
 
 /// Observations retained after invalidation have no revision identity.
 #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ObservedEvidence {
     pub snapshot: DatabaseSnapshot,
     pub pages: Vec<PageEntity>,
     pub coverage: Coverage,
+    pub relationship_claims: Vec<super::RelationshipClaim>,
+    pub relationships: Vec<super::Relationship>,
+    pub traversals: Vec<super::Traversal>,
+    pub diagnostics: Vec<super::StructuralDiagnostic>,
+    pub topology_coverage: super::TopologyCoverage,
 }
 
 /// Metadata excludes access time, so inspection reads cannot invalidate themselves.
@@ -307,8 +314,13 @@ struct SessionData {
     inputs: Arc<Inputs>,
     status: SessionStatus,
     snapshot: Option<DatabaseSnapshot>,
-    pages: Vec<PageEntity>,
+    pages: Arc<Vec<PageEntity>>,
     published: Option<Arc<InspectionGraph>>,
+    traversal_budget: super::TraversalBudget,
+    topology_active: bool,
+    topology_cancellation: Arc<super::topology::WorkControl>,
+    pending_topology_stop: Option<(SessionState, CoverageReason)>,
+    observed_topology: Option<super::topology::Topology>,
 }
 
 impl SessionData {
@@ -340,6 +352,7 @@ impl SessionData {
     }
 
     fn invalidate(&mut self, changes: Vec<&'static str>) {
+        self.topology_cancellation.cancel();
         self.status.state = SessionState::Invalidated;
         self.status.revision = None;
         self.status.coverage = Some(self.coverage(CoverageReason::InputChanged));
@@ -348,14 +361,26 @@ impl SessionData {
             affected_inputs: changes });
     }
 
-    fn publish(&mut self, state: SessionState, reason: CoverageReason) {
+    fn publish(
+        &mut self,
+        state: SessionState,
+        reason: CoverageReason,
+        topology: super::topology::Topology,
+    ) {
         let coverage = self.coverage(reason);
         if let Some(snapshot) = &self.snapshot {
+            let pages = Arc::try_unwrap(std::mem::replace(&mut self.pages, Arc::new(Vec::new())))
+                .unwrap_or_else(|pages| (*pages).clone());
             self.published = Some(Arc::new(InspectionGraph {
                 revision: 1,
                 coverage: coverage.clone(),
                 snapshot: snapshot.clone(),
-                pages: std::mem::take(&mut self.pages),
+                pages,
+                relationship_claims: topology.claims,
+                relationships: topology.relationships,
+                traversals: topology.traversals,
+                diagnostics: topology.diagnostics,
+                topology_coverage: topology.coverage,
             }));
             self.status.revision = Some(1);
         }
@@ -392,6 +417,16 @@ impl InspectionSession {
     /// # Errors
     /// Returns an input-access or invalidation error if acceptance cannot establish a stable input set.
     pub fn begin(path: &Path) -> Result<Self, InspectionError> {
+        Self::begin_with_traversal_budget(path, super::TraversalBudget::default())
+    }
+
+    /// Accepts inputs with explicit relationship traversal ceilings without publishing a graph.
+    /// # Errors
+    /// Returns an input-access or invalidation error if acceptance cannot establish a stable input set.
+    pub fn begin_with_traversal_budget(
+        path: &Path,
+        traversal_budget: super::TraversalBudget,
+    ) -> Result<Self, InspectionError> {
         Ok(Self {
             active_checks: AtomicUsize::new(0),
             cancel_verification: AtomicBool::new(false),
@@ -409,14 +444,20 @@ impl InspectionSession {
                         completed: 0,
                         total: None,
                         verifying: false,
+                        building_topology: false,
                     },
                     revision: None,
                     coverage: None,
                     diagnostic: None,
                 },
                 snapshot: None,
-                pages: Vec::new(),
+                pages: Arc::new(Vec::new()),
                 published: None,
+                traversal_budget,
+                topology_active: false,
+                topology_cancellation: Arc::new(super::topology::WorkControl::new()),
+                pending_topology_stop: None,
+                observed_topology: None,
             }),
         })
     }
@@ -426,6 +467,18 @@ impl InspectionSession {
     /// Returns geometry, input-access, or invalidation errors.
     pub fn open(path: &Path) -> Result<Self, InspectionError> {
         let session = Self::begin(path)?;
+        session.scan(|_| ScanControl::Continue)?;
+        Ok(session)
+    }
+
+    /// Accepts inputs and finishes the inventory with explicit traversal ceilings.
+    /// # Errors
+    /// Returns geometry, input-access, or invalidation errors.
+    pub fn open_with_traversal_budget(
+        path: &Path,
+        traversal_budget: super::TraversalBudget,
+    ) -> Result<Self, InspectionError> {
+        let session = Self::begin_with_traversal_budget(path, traversal_budget)?;
         session.scan(|_| ScanControl::Continue)?;
         Ok(session)
     }
@@ -460,16 +513,81 @@ impl InspectionSession {
         Ok(())
     }
 
-    fn finish(&self, state: SessionState, reason: CoverageReason) -> Result<(), InspectionError> {
-        self.verify(|| {})?;
+    fn finish(
+        &self,
+        state: SessionState,
+        reason: CoverageReason,
+        checkpoint: impl FnOnce(),
+    ) -> Result<(), InspectionError> {
+        self.verify(checkpoint)?;
+        let (inputs, snapshot, pages, budget, cancellation) = {
+            let mut d = self.lock();
+            if !d.validate() {
+                return Err(InspectionError::Invalidated);
+            }
+            if d.status.state != SessionState::Scanning {
+                return Err(InspectionError::NotScanning);
+            }
+            if d.topology_active {
+                return Err(InspectionError::NotScanning);
+            }
+            d.topology_active = true;
+            d.topology_cancellation.reset();
+            (
+                Arc::clone(&d.inputs),
+                d.snapshot.clone(),
+                Arc::clone(&d.pages),
+                d.traversal_budget,
+                Arc::clone(&d.topology_cancellation),
+            )
+        };
+        let topology = snapshot.as_ref().map_or_else(
+            || super::topology::Topology::empty(budget),
+            |snapshot| {
+                super::topology::inspect(
+                    &inputs.file,
+                    &snapshot.geometry,
+                    &pages,
+                    budget,
+                    &cancellation,
+                )
+            },
+        );
+        drop(pages);
+        let (publish_state, publish_reason, pending_stop) = {
+            let mut d = self.lock();
+            d.topology_active = false;
+            if d.status.state == SessionState::Invalidated {
+                d.observed_topology = Some(topology);
+                return Err(InspectionError::Invalidated);
+            }
+            if let Some((pending_state, pending_reason)) = d.pending_topology_stop.take() {
+                (pending_state, pending_reason, true)
+            } else if d.status.state == SessionState::Scanning {
+                (state, reason, false)
+            } else {
+                return Ok(());
+            }
+        };
+        // Topology follows overflow pointers with additional positional reads.
+        // Verify content again before publishing those facts as one revision.
+        if let Err(error) = self.verify(|| {}) {
+            if matches!(error, InspectionError::Invalidated) {
+                self.lock().observed_topology = Some(topology);
+            }
+            return Err(error);
+        }
         let mut d = self.lock();
         if !d.validate() {
+            d.observed_topology = Some(topology);
             return Err(InspectionError::Invalidated);
         }
-        if d.status.state != SessionState::Scanning {
+        if (!pending_stop && d.status.state != SessionState::Scanning)
+            || (pending_stop && d.status.state != publish_state)
+        {
             return Err(InspectionError::NotScanning);
         }
-        d.publish(state, reason);
+        d.publish(publish_state, publish_reason, topology);
         Ok(())
     }
 
@@ -480,6 +598,7 @@ impl InspectionSession {
         data.validate();
         let mut status = data.status.clone();
         status.progress.verifying = self.active_checks.load(Ordering::Acquire) > 0;
+        status.progress.building_topology = data.topology_active;
         status
     }
 
@@ -492,6 +611,9 @@ impl InspectionSession {
             return Err(InspectionError::Invalidated);
         }
         if d.status.state != SessionState::Scanning {
+            return Err(InspectionError::NotScanning);
+        }
+        if d.topology_active {
             return Err(InspectionError::NotScanning);
         }
         if d.snapshot.is_none() {
@@ -521,11 +643,15 @@ impl InspectionSession {
             }
         } else if Some(d.status.progress.completed) == d.status.progress.total {
             drop(d);
-            self.finish(SessionState::Published, CoverageReason::Complete)?;
+            self.finish(SessionState::Published, CoverageReason::Complete, || {})?;
         } else {
-            if d.pages.try_reserve(1).is_err() {
+            if Arc::make_mut(&mut d.pages).try_reserve(1).is_err() {
                 drop(d);
-                return self.finish(SessionState::Stopped, CoverageReason::AllocationFailure);
+                return self.finish(
+                    SessionState::Stopped,
+                    CoverageReason::AllocationFailure,
+                    || {},
+                );
             }
             let number = d.status.progress.completed + 1;
             let geometry = &d
@@ -534,7 +660,7 @@ impl InspectionSession {
                 .ok_or(InspectionError::NotScanning)?
                 .geometry;
             let detail = super::btree::read_page(&d.inputs.file, number, geometry);
-            d.pages.push(PageEntity { number, detail });
+            Arc::make_mut(&mut d.pages).push(PageEntity { number, detail });
             d.status.progress.completed = number;
             if !d.validate() {
                 return Err(InspectionError::Invalidated);
@@ -570,12 +696,13 @@ impl InspectionSession {
                 ScanControl::Continue
                     if status.progress.total == Some(status.progress.completed) =>
                 {
-                    let result = self.verify(|| {
-                        let control = observe(&self.status());
-                        if control != ScanControl::Continue {
-                            let _ = self.stop(control);
-                        }
-                    });
+                    let result =
+                        self.finish(SessionState::Published, CoverageReason::Complete, || {
+                            let control = observe(&self.status());
+                            if control != ScanControl::Continue {
+                                let _ = self.stop(control);
+                            }
+                        });
                     if let Err(error) = result {
                         return if self.status().state == SessionState::Cancelled
                             || self.status().state == SessionState::Stopped
@@ -584,13 +711,6 @@ impl InspectionSession {
                         } else {
                             Err(error)
                         };
-                    }
-                    let mut d = self.lock();
-                    if !d.validate() {
-                        return Err(InspectionError::Invalidated);
-                    }
-                    if d.status.state == SessionState::Scanning {
-                        d.publish(SessionState::Published, CoverageReason::Complete);
                     }
                     return Ok(());
                 }
@@ -626,8 +746,24 @@ impl InspectionSession {
             // Integrity was not established, so this stop has no navigable revision.
             return Ok(());
         }
+        if d.topology_active {
+            match control {
+                ScanControl::Cancel => d.topology_cancellation.cancel(),
+                ScanControl::Stop => d.topology_cancellation.stop(),
+                ScanControl::Continue => unreachable!("continue returned above"),
+            }
+            let inventory_reason = if d.status.progress.total == Some(d.status.progress.completed) {
+                CoverageReason::Complete
+            } else {
+                reason
+            };
+            d.pending_topology_stop = Some((state, inventory_reason));
+            d.status.state = state;
+            d.status.coverage = Some(d.coverage(inventory_reason));
+            return Ok(());
+        }
         drop(d);
-        self.finish(state, reason)
+        self.finish(state, reason, || {})
     }
 
     /// Resolves a published revision after validating input stability. This is also the
@@ -672,13 +808,46 @@ impl InspectionSession {
             return None;
         }
         let snapshot = d.snapshot.clone()?;
+        let published = d.published.as_deref();
+        let observed = d.observed_topology.as_ref();
         Some(ObservedEvidence {
             coverage: d.coverage(CoverageReason::InputChanged),
             snapshot,
-            pages: d
-                .published
-                .as_ref()
-                .map_or_else(|| d.pages.clone(), |r| r.pages.clone()),
+            pages: published.map_or_else(|| (*d.pages).clone(), |revision| revision.pages.clone()),
+            relationship_claims: published.map_or_else(
+                || observed.map_or_else(Vec::new, |topology| topology.claims.clone()),
+                |revision| revision.relationship_claims.clone(),
+            ),
+            relationships: published.map_or_else(
+                || observed.map_or_else(Vec::new, |topology| topology.relationships.clone()),
+                |revision| revision.relationships.clone(),
+            ),
+            traversals: published.map_or_else(
+                || observed.map_or_else(Vec::new, |topology| topology.traversals.clone()),
+                |revision| revision.traversals.clone(),
+            ),
+            diagnostics: published.map_or_else(
+                || observed.map_or_else(Vec::new, |topology| topology.diagnostics.clone()),
+                |revision| revision.diagnostics.clone(),
+            ),
+            topology_coverage: published.map_or_else(
+                || {
+                    observed.map_or(
+                        super::TopologyCoverage {
+                            reason: super::TopologyCoverageReason::Cancelled,
+                            phase: super::TopologyPhase::BtreeClaimCollection,
+                            evaluated: 0,
+                            total: None,
+                            next: None,
+                            remainder: None,
+                            next_phase: None,
+                            traversal_budget: d.traversal_budget,
+                        },
+                        |topology| topology.coverage,
+                    )
+                },
+                |revision| revision.topology_coverage,
+            ),
         })
     }
 }

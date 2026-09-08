@@ -8,11 +8,18 @@ use thiserror::Error;
 
 mod btree;
 mod session;
+mod topology;
 pub use btree::{
     ByteRange, CellDetail, CellIdentity, Kind as BtreeKind, LocalCoverage, PageDetail, RecordState,
 };
 pub use session::{
     Coverage, CoverageReason, InspectionSession, Progress, ScanControl, SessionState, SessionStatus,
+};
+pub use topology::{
+    Containment, DiagnosticSeverity, EntityIdentity, PageIdentity, PhysicalEvidence, Relationship,
+    RelationshipClaim, RelationshipKind, RelationshipState, StructuralDiagnostic, TopologyCoverage,
+    TopologyCoverageReason, TopologyPhase, Traversal, TraversalBudget, TraversalKind,
+    TraversalStop, TraversalStopReason,
 };
 
 const SQLITE_HEADER_SIZE: usize = 100;
@@ -102,6 +109,11 @@ pub struct InspectionGraph {
     pub coverage: Coverage,
     pub snapshot: DatabaseSnapshot,
     pub pages: Vec<PageEntity>,
+    pub relationship_claims: Vec<RelationshipClaim>,
+    pub relationships: Vec<Relationship>,
+    pub traversals: Vec<Traversal>,
+    pub diagnostics: Vec<StructuralDiagnostic>,
+    pub topology_coverage: TopologyCoverage,
 }
 
 fn read_snapshot(

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::net::TcpListener;
-use volmap_sqlite::inspection::{InspectionSession, ScanControl};
+use volmap_sqlite::inspection::{InspectionSession, ScanControl, TraversalBudget};
 use volmap_sqlite::web::atlas_router;
 
 #[derive(Debug, Parser)]
@@ -19,12 +19,31 @@ struct Arguments {
     /// Address for the embedded browser viewer.
     #[arg(long, default_value = "127.0.0.1:3000")]
     listen: SocketAddr,
+
+    /// Maximum number of pages retained in each B-tree traversal prefix (minimum 1).
+    #[arg(long, default_value_t = u32::MAX, value_parser = clap::value_parser!(u32).range(1..))]
+    max_btree_pages: u32,
+
+    /// Maximum number of pages retained in each overflow-chain prefix.
+    #[arg(long, default_value_t = u32::MAX)]
+    max_overflow_pages: u32,
+
+    /// Maximum aggregate page identities allocated across all traversal prefixes (minimum 1).
+    #[arg(long, default_value_t = 1_000_000, value_parser = clap::value_parser!(u64).range(1..))]
+    max_total_traversal_pages: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let arguments = Arguments::parse();
-    let session = Arc::new(InspectionSession::begin(&arguments.database)?);
+    let session = Arc::new(InspectionSession::begin_with_traversal_budget(
+        &arguments.database,
+        TraversalBudget::with_total_pages(
+            arguments.max_btree_pages,
+            arguments.max_overflow_pages,
+            arguments.max_total_traversal_pages,
+        ),
+    )?);
     let display_name = session.status().source.display_name;
 
     if !arguments.listen.ip().is_loopback() {
@@ -49,4 +68,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let _ = worker.await?;
     server?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn traversal_limits_are_explicit_cli_inputs() {
+        let arguments = Arguments::try_parse_from([
+            "volmap-sqlite",
+            "fixture.sqlite",
+            "--max-btree-pages",
+            "12",
+            "--max-overflow-pages",
+            "34",
+            "--max-total-traversal-pages",
+            "56",
+        ])
+        .unwrap();
+
+        assert_eq!(arguments.max_btree_pages, 12);
+        assert_eq!(arguments.max_overflow_pages, 34);
+        assert_eq!(arguments.max_total_traversal_pages, 56);
+    }
+
+    #[test]
+    fn traversal_limits_reject_values_without_a_representable_boundary() {
+        for flag in ["--max-btree-pages", "--max-total-traversal-pages"] {
+            assert!(
+                Arguments::try_parse_from(["volmap-sqlite", "fixture.sqlite", flag, "0"]).is_err()
+            );
+        }
+    }
 }

@@ -24,14 +24,57 @@ const graph: InspectionGraph = {
     regions: [{ kind: "cell_content", range: { pageOffset: 4076, fileOffset: (number - 1) * 4096 + 4076, length: 4 } }],
     cells: [{ identity: { pageNumber: number, index: 0 }, pointer: { pageOffset: 8, fileOffset: (number - 1) * 4096 + 8, length: 2 }, offset: 4076,
       range: { pageOffset: 4076, fileOffset: (number - 1) * 4096 + 4076, length: 4 }, rowid: "99", leftChild: null,
+      leftChildPointer: null,
       payloadSize: 2, localPayload: { pageOffset: 4078, fileOffset: (number - 1) * 4096 + 4078, length: 2 }, overflowPage: null,
+      overflowPointer: null,
       record: { state: "complete", headerSize: 2, serialTypes: ["8"] }, diagnostic: null }],
   } })),
+  relationshipClaims: [
+    {
+      id: "btree:page:1:rightmost", kind: "btree_child", source: { type: "page", pageNumber: 1 },
+      target: { pageNumber: 2 }, state: "validated",
+      evidence: { page: { pageNumber: 1 }, range: { pageOffset: 120, fileOffset: 120, length: 4 }, validationRule: "sqlite_btree_interior_rightmost_child" },
+    },
+    {
+      id: "overflow:cell:2:0", kind: "overflow", source: { type: "cell", pageNumber: 2, cellIndex: 0 },
+      target: { pageNumber: 3 }, state: "validated",
+      evidence: { page: { pageNumber: 2 }, range: { pageOffset: 4080, fileOffset: 8176, length: 4 }, validationRule: "sqlite_btree_first_overflow_page" },
+    },
+  ],
+  relationships: [
+    {
+      claimId: "btree:page:1:rightmost", kind: "btree_child",
+      source: { type: "page", pageNumber: 1 }, target: { pageNumber: 2 },
+    },
+    {
+      claimId: "overflow:cell:2:0", kind: "overflow",
+      source: { type: "cell", pageNumber: 2, cellIndex: 0 }, target: { pageNumber: 3 },
+    },
+  ],
+  traversals: [],
+  diagnostics: [{
+    code: "fixture_relationship_diagnostic", severity: "error",
+    evidence: [
+      { page: { pageNumber: 1 }, range: { pageOffset: 120, fileOffset: 120, length: 4 }, validationRule: "fixture_rule" },
+      { page: { pageNumber: 2 }, range: { pageOffset: 44, fileOffset: 4140, length: 4 }, validationRule: "fixture_rule" },
+    ],
+    affectedRelationships: ["btree:page:1:rightmost", "overflow:cell:2:0"], containment: "traversal_stopped",
+  }],
+  topologyCoverage: {
+    reason: "complete",
+    phase: "complete",
+    evaluated: 0,
+    total: 0,
+    next: null,
+    remainder: 0,
+    nextPhase: null,
+    traversalBudget: { maxBtreePages: 1000, maxOverflowPages: 1000, maxTotalPages: "18446744073709551615" },
+  },
 };
 
 const published: SessionStatus = {
   snapshotId: "snapshot-fixture", source: graph.snapshot.source, state: "published",
-  progress: { unit: "pages", completed: 3, total: 3, verifying: false }, revision: 1, coverage: graph.coverage, diagnostic: null,
+  progress: { unit: "pages", completed: 3, total: 3, verifying: false, buildingTopology: false }, revision: 1, coverage: graph.coverage, diagnostic: null,
 };
 
 function respond(status: () => SessionStatus) {
@@ -54,6 +97,8 @@ describe("page atlas", () => {
 
     expect(await screen.findByRole("heading", { name: "Page atlas" })).toBeTruthy();
     expect(screen.getByText("customer-data.sqlite")).toBeTruthy();
+    expect(screen.getByText("0 / 0 work units")).toBeTruthy();
+    expect(screen.getByText("18,446,744,073,709,551,615")).toBeTruthy();
     expect(container.querySelectorAll("[data-page-number]")).toHaveLength(3);
     expect(fetch).toHaveBeenCalledWith("/api/snapshots/snapshot-fixture/revisions/1", expect.objectContaining({ cache: "no-store" }));
 
@@ -66,9 +111,28 @@ describe("page atlas", () => {
     expect(screen.getByRole("table", { name: "Cell inventory" })).toBeTruthy();
   });
 
+  it("follows validated relationships in both directions and jumps to diagnostic evidence", async () => {
+    render(<App />);
+    await screen.findByRole("heading", { name: "Page atlas" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Follow btree child to page 2" }));
+    expect(screen.getByRole("heading", { name: "Page 2" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Follow btree child back to page 1" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Follow overflow to page 3" }));
+    expect(screen.getByRole("heading", { name: "Page 3" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Jump to page 1 byte 120" }));
+    expect(screen.getByRole("heading", { name: "Page 1" })).toBeTruthy();
+    expect(screen.getByText("fixture relationship diagnostic")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Jump to page 2 byte 44" }));
+    expect(screen.getByRole("heading", { name: "Page 2" })).toBeTruthy();
+  });
+
   it("shows progress without a mosaic, then adopts only the published revision", async () => {
     let status: SessionStatus = { ...published, state: "scanning", revision: null, coverage: null,
-      progress: { unit: "pages", completed: 1, total: 3, verifying: false } };
+      progress: { unit: "pages", completed: 1, total: 3, verifying: false, buildingTopology: false } };
     respond(() => status);
     const { container } = render(<App />);
     expect(await screen.findByRole("heading", { name: "Scanning" })).toBeTruthy();

@@ -62,6 +62,16 @@ h2 { font-size: 20px; }
 .page-detail th, .page-detail td { padding: 10px 12px; border-bottom: 1px solid #2b3038; vertical-align: top; overflow-wrap: anywhere; min-width: 100px; }
 .page-detail th { color: #9da8b4; }
 .diagnostics { color: #e1bd73; }
+.claim-state { display: inline-block; color: #bec6cf; font: 11px ui-monospace, monospace; }
+.claim-state.validated { color: #70d5c1; }
+.claim-state.invalid, .claim-state.unresolved, .claim-state.conflicting { color: #e1bd73; }
+.page-detail button, .relationship-diagnostics button { margin-top: 6px; padding: 5px 8px; border: 1px solid #60717a; border-radius: 5px; color: #e9edf4; background: #181c22; cursor: pointer; }
+.evidence-locus { padding: 10px 12px; border-left: 3px solid #e1bd73; color: #e9d4a8; background: #342d25; font: 12px ui-monospace, monospace; }
+.relationship-diagnostics { margin-top: 24px; border: 1px solid #5e5037; border-radius: 12px; padding: 24px; background: #18150fcc; }
+.relationship-diagnostics ul { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.relationship-diagnostics li { display: flex; align-items: center; gap: 14px; padding-top: 10px; border-top: 1px solid #3b3428; }
+.relationship-diagnostics li span { color: #9da8b4; font: 11px ui-monospace, monospace; }
+.relationship-diagnostics li button { margin: 0 0 0 auto; }
 
 @media (max-width: 800px) {
   .workspace { padding: 24px 18px 48px; }

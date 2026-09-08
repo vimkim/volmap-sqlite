@@ -1,4 +1,34 @@
 export interface ByteRange { pageOffset: number; fileOffset: number; length: number }
+export interface PageIdentity { pageNumber: number }
+export type EntityIdentity =
+  | { type: "page"; pageNumber: number }
+  | { type: "cell"; pageNumber: number; cellIndex: number };
+export interface PhysicalEvidence {
+  page: PageIdentity;
+  range: ByteRange;
+  validationRule: string;
+}
+export interface RelationshipClaim {
+  id: string;
+  kind: "btree_child" | "overflow";
+  source: EntityIdentity;
+  target: PageIdentity | null;
+  evidence: PhysicalEvidence;
+  state: "validated" | "unresolved" | "invalid" | "conflicting" | "terminal";
+}
+export interface Relationship {
+  claimId: string;
+  kind: "btree_child" | "overflow";
+  source: EntityIdentity;
+  target: PageIdentity;
+}
+export interface StructuralDiagnostic {
+  code: string;
+  severity: "warning" | "error";
+  evidence: PhysicalEvidence[];
+  affectedRelationships: string[];
+  containment: "traversal_stopped" | "relationship_excluded";
+}
 export interface PageEvidence {
   kind: "table_leaf" | "table_interior" | "index_leaf" | "index_interior" | null;
   coverage: "complete" | "partial" | "unsupported";
@@ -7,7 +37,9 @@ export interface PageEvidence {
   cells: Array<{
     identity: { pageNumber: number; index: number }; pointer: ByteRange; offset: number;
     range: ByteRange | null; rowid: string | null; leftChild: number | null;
+    leftChildPointer: ByteRange | null;
     payloadSize: number | null; localPayload: ByteRange | null; overflowPage: number | null;
+    overflowPointer: ByteRange | null;
     record: { state: "complete" | "invalid" | "needs_overflow" | "unsupported_format"; headerSize: number | null; serialTypes: string[] } | null;
     diagnostic: string | null;
   }>;
@@ -25,7 +57,25 @@ function extent(range: ByteRange | null, file = false): string {
   return `[${start}, ${start + range.length})`;
 }
 
-export function PageDetail({ detail, pageSize }: { detail: PageEvidence; pageSize: number }) {
+function sourcePage(source: EntityIdentity): number {
+  return source.pageNumber;
+}
+
+function relationshipLabel(kind: Relationship["kind"]): string {
+  return kind.replaceAll("_", " ");
+}
+
+export function PageDetail({
+  detail, pageSize, pageNumber, claims, relationshipsByClaim, onSelectPage, evidenceByte,
+}: {
+  detail: PageEvidence;
+  pageSize: number;
+  pageNumber: number;
+  claims: RelationshipClaim[];
+  relationshipsByClaim: ReadonlyMap<string, Relationship>;
+  onSelectPage: (page: number) => void;
+  evidenceByte: number | null;
+}) {
   const { header } = detail;
   const allocations = [
     ...detail.regions.filter(region => region.kind !== "usable_space" && region.kind !== "cell_content"),
@@ -34,7 +84,8 @@ export function PageDetail({ detail, pageSize }: { detail: PageEvidence; pageSiz
   ];
   return <section className="page-detail" aria-label="Page structural detail">
     <div className="section-heading"><h2>Structural evidence</h2><span>Local B-tree coverage: {detail.coverage}</span></div>
-    <p className="evidence-note">Role is a locally validated header claim; topology and global role reconciliation are not evaluated. Application values and raw payload bytes are not disclosed.</p>
+    <p className="evidence-note">Role is a locally validated header claim. B-tree and overflow topology is evaluated separately below; global role reconciliation is later work. Application values and raw payload bytes are not disclosed.</p>
+    {evidenceByte !== null && <p className="evidence-locus" role="status">Diagnostic evidence locus: page {pageNumber}, byte {evidenceByte}</p>}
     {detail.diagnostics.length > 0 && <ul className="diagnostics">{detail.diagnostics.map((code, index) => <li key={index}>{code.replaceAll("_", " ")}</li>)}</ul>}
     {header && <dl className="header-fields">
       <div><dt>Header (page bytes)</dt><dd>{extent(header.range)}</dd></div>
@@ -58,8 +109,31 @@ export function PageDetail({ detail, pageSize }: { detail: PageEvidence; pageSiz
         <tbody>{detail.regions.map(({ kind, range }, index) => <tr key={index}><td>{kind.replaceAll("_", " ")}</td><td>{extent(range)}</td><td>{extent(range, true)}</td><td>{range.length} B</td></tr>)}</tbody>
       </table></div>
     </section>
+    <section aria-label="Page relationships">
+      <h3>Relationship claims</h3>
+      {claims.length === 0 ? <p className="evidence-note">No B-tree child or overflow claims touch this page.</p> :
+      <div className="table-scroll"><table aria-label="Relationship claims"><thead><tr><th>Relationship</th><th>Direction</th><th>Target</th><th>Evidence</th><th>Validation</th></tr></thead>
+        <tbody>{claims.map(claim => {
+          const outgoing = sourcePage(claim.source) === pageNumber;
+          const relationship = relationshipsByClaim.get(claim.id);
+          const destination = outgoing ? relationship?.target.pageNumber : relationship ? sourcePage(relationship.source) : undefined;
+          return <tr key={claim.id}>
+            <td>{claim.id}</td>
+            <td>{outgoing ? "Outgoing" : "Incoming"}</td>
+            <td>{claim.target ? `page:${claim.target.pageNumber}` : "End of chain"}</td>
+            <td>Page bytes {extent(claim.evidence.range)}<br />{claim.evidence.validationRule.replaceAll("_", " ")}</td>
+            <td><span className={`claim-state ${claim.state}`}>{claim.state}</span>
+              {destination !== undefined && destination !== pageNumber && <><br /><button type="button" onClick={() => onSelectPage(destination)}
+                aria-label={`Follow ${relationshipLabel(claim.kind)} ${outgoing ? "to" : "back to"} page ${destination}`}>
+                {outgoing ? "Follow target" : "Follow source"}
+              </button></>}
+            </td>
+          </tr>;
+        })}</tbody>
+      </table></div>}
+    </section>
     <h3>Cell inventory</h3>
-    <p className="evidence-note">Identity uses the zero-based cell-pointer-array index, not the rowid or key. Child and overflow numbers are untraversed claims.</p>
+    <p className="evidence-note">Identity uses the zero-based cell-pointer-array index, not the rowid or key. Child and overflow pointers link to the validated relationship evidence above.</p>
     <div className="table-scroll"><table aria-label="Cell inventory"><thead><tr><th>Physical identity</th><th>Pointer / offset</th><th>Validated extent</th><th>Structural facts</th><th>Record structure</th></tr></thead>
       <tbody>{detail.cells.map(cell => <tr key={cell.identity.index}>
         <td>{`cell:${cell.identity.pageNumber}:${cell.identity.index}`}</td>

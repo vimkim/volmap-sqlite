@@ -75,9 +75,11 @@ pub struct CellDetail {
     pub range: Option<ByteRange>,
     pub rowid: Option<String>,
     pub left_child: Option<u32>,
+    pub left_child_pointer: Option<ByteRange>,
     pub payload_size: Option<u64>,
     pub local_payload: Option<ByteRange>,
     pub overflow_page: Option<u32>,
+    pub overflow_pointer: Option<ByteRange>,
     pub record: Option<RecordDetail>,
     pub diagnostic: Option<&'static str>,
 }
@@ -240,9 +242,11 @@ impl Page<'_> {
                 record: None,
                 diagnostic: None,
                 left_child: None,
+                left_child_pointer: None,
                 payload_size: None,
                 local_payload: None,
                 overflow_page: None,
+                overflow_pointer: None,
             };
             let result = if offset < start || offset >= self.usable {
                 Err("invalid_cell_pointer")
@@ -395,7 +399,11 @@ impl Page<'_> {
             if cursor + 4 > self.usable {
                 return Err("invalid_cell_extent");
             }
+            cell.left_child_pointer = Some(self.range(cursor, 4));
             let child = dword(self.bytes, cursor);
+            // The child pointer is an independently bounded physical fact. Keep it
+            // even when a later varint or payload field in this cell is malformed.
+            cell.left_child = Some(child);
             cursor += 4;
             Some(child)
         } else {
@@ -405,7 +413,6 @@ impl Page<'_> {
             let rowid = varint(&self.bytes[..self.usable], &mut cursor)?;
             cell.range = Some(self.range(offset, cursor - offset));
             cell.rowid = Some(i64::from_be_bytes(rowid.to_be_bytes()).to_string());
-            cell.left_child = left_child;
             return Ok(());
         }
         let payload = varint(&self.bytes[..self.usable], &mut cursor)?;
@@ -447,6 +454,7 @@ impl Page<'_> {
         cell.payload_size = Some(payload);
         cell.local_payload = Some(self.range(cursor, local));
         cell.overflow_page = spill.then(|| dword(self.bytes, cursor + local));
+        cell.overflow_pointer = spill.then(|| self.range(cursor + local, 4));
         Ok(())
     }
 }
@@ -508,10 +516,8 @@ fn contain_overlaps(detail: &mut PageDetail, content_start: usize, usable: usize
                 cell.range = None;
                 cell.rowid = None;
                 cell.record = None;
-                cell.left_child = None;
                 cell.payload_size = None;
                 cell.local_payload = None;
-                cell.overflow_page = None;
                 cell.diagnostic = Some("overlapping_allocation");
             }
         }
