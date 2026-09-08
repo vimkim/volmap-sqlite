@@ -41,6 +41,9 @@ h2 { font-size: 20px; }
 .evidence-panel dd.unknown { color: #e1bd73; }
 .evidence-note { margin: 0; color: #78838f; font-size: 12px; line-height: 1.65; }
 .message { min-height: 100vh; display: grid; place-content: center; padding: 32px; }
+.inspection-notice { margin: 24px 0; padding: 18px 20px; border: 1px solid #60717a; border-radius: 12px; background: #111419; }
+.inspection-notice p { color: #bec6cf; line-height: 1.6; }
+.inspection-notice [role="alert"] { color: #e1bd73; }
 
 @media (max-width: 800px) {
   .workspace { padding: 24px 18px 48px; }

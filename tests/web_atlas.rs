@@ -6,7 +6,7 @@ use axum::http::{Request, StatusCode, header};
 use rusqlite::Connection;
 use tempfile::TempDir;
 use tower::ServiceExt;
-use volmap_sqlite::inspection::InspectionSession;
+use volmap_sqlite::inspection::{InspectionSession, ScanControl};
 use volmap_sqlite::web::atlas_router;
 
 fn write_fixture(path: &Path) {
@@ -33,14 +33,14 @@ async fn serves_the_real_graph_and_embedded_atlas_without_disclosing_its_path() 
     let database_path = directory.path().join("customer-data.sqlite");
     write_fixture(&database_path);
     let session = Arc::new(InspectionSession::open(&database_path).expect("valid database"));
-    let snapshot_id = session.graph().snapshot.id.clone();
+    let snapshot_id = session.status().snapshot_id;
     let app = atlas_router(session);
 
     let api_response = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/api/snapshots/{snapshot_id}"))
+                .uri(format!("/api/snapshots/{snapshot_id}/revisions/1"))
                 .body(Body::empty())
                 .expect("API request"),
         )
@@ -67,9 +67,8 @@ async fn serves_the_real_graph_and_embedded_atlas_without_disclosing_its_path() 
     assert_eq!(atlas_response.status(), StatusCode::OK);
     let atlas_body = response_body(atlas_response).await;
     assert!(atlas_body.contains("Page atlas"));
-    assert!(atlas_body.contains("customer-data.sqlite"));
-    assert!(atlas_body.contains("data-page-number=\"1\""));
-    assert!(atlas_body.contains("data-page-number=\"3\""));
+    assert!(atlas_body.contains("id=\"root\""));
+    assert!(!atlas_body.contains("data-page-number"));
     assert!(atlas_body.contains(&snapshot_id));
     assert!(!atlas_body.contains("fixture-value"));
     assert!(!atlas_body.contains(directory.path().to_string_lossy().as_ref()));
@@ -110,4 +109,88 @@ async fn rejects_a_snapshot_identifier_from_another_session() {
         .expect("API response");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+async fn get(app: axum::Router, uri: &str) -> axum::response::Response {
+    app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn status_progress_is_separate_from_revision_and_invalidated_evidence() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("main.sqlite");
+    write_fixture(&path);
+    let session = Arc::new(InspectionSession::begin(&path).unwrap());
+    let base = format!("/api/snapshots/{}", session.status().snapshot_id);
+    let app = atlas_router(Arc::clone(&session));
+    let status = response_body(get(app.clone(), &base).await).await;
+    assert!(status.contains("\"state\":\"scanning\""));
+    assert!(!status.contains("\"pages\":"));
+    assert_eq!(
+        get(app.clone(), &format!("{base}/revisions/1"))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    session.scan(|_| ScanControl::Continue).unwrap();
+    let published = get(app.clone(), &format!("{base}/revisions/1")).await;
+    assert_eq!(published.status(), StatusCode::OK);
+    let published_body = response_body(published).await;
+    assert!(published_body.contains("\"revision\":1"));
+    assert_eq!(
+        get(app.clone(), &format!("{base}/revisions/2"))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    std::fs::write(dir.path().join("main.sqlite-wal"), [0; 32]).unwrap();
+    let rejected = get(app.clone(), &format!("{base}/revisions/1")).await;
+    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    assert_eq!(rejected.headers()[header::CACHE_CONTROL], "no-store");
+    let body = response_body(rejected).await;
+    assert!(body.contains("input_changed"));
+    assert!(!body.contains("\"pages\":"));
+    let evidence = response_body(get(app, &format!("{base}/evidence")).await).await;
+    assert!(evidence.contains("\"number\":3"));
+    assert!(!evidence.contains("\"revision\":"));
+    for body in [&status, &published_body, &body, &evidence] {
+        assert!(!body.contains(dir.path().to_str().unwrap()));
+        assert!(!body.contains("fixture-value"));
+    }
+}
+
+#[tokio::test]
+async fn cancellation_publishes_an_explicit_partial_revision() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("main.sqlite");
+    write_fixture(&path);
+    let session = Arc::new(InspectionSession::begin(&path).unwrap());
+    session.advance().unwrap();
+    session.advance().unwrap();
+    let base = format!("/api/snapshots/{}", session.status().snapshot_id);
+    let app = atlas_router(Arc::clone(&session));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{base}/cancel"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response_body(response)
+            .await
+            .contains("\"state\":\"cancelled\"")
+    );
+    let graph = response_body(get(app, &format!("{base}/revisions/1")).await).await;
+    assert!(graph.contains("\"reason\":\"cancelled\""));
+    assert!(graph.contains("\"nextPage\":2"));
+    assert!(!graph.contains("\"number\":2"));
 }

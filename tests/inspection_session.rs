@@ -39,7 +39,7 @@ fn opens_a_valid_main_file_as_a_snapshot_scoped_page_graph() {
     write_fixture(&database_path, 4_096, 3, 16);
 
     let session = InspectionSession::open(&database_path).expect("valid database");
-    let graph = session.graph();
+    let graph = session.graph().expect("published graph");
 
     assert_eq!(graph.snapshot.source.display_name, "catalog.sqlite");
     assert!(!graph.snapshot.source.id.is_empty());
@@ -58,7 +58,7 @@ fn opens_a_valid_main_file_as_a_snapshot_scoped_page_graph() {
         vec![1, 2, 3]
     );
 
-    let serialized = serde_json::to_string(graph).expect("serialize graph");
+    let serialized = serde_json::to_string(&*graph).expect("serialize graph");
     assert!(!serialized.contains(directory.path().to_string_lossy().as_ref()));
 }
 
@@ -169,5 +169,13 @@ fn ignores_a_declared_page_count_marked_stale_by_header_counters() {
 
     let session =
         InspectionSession::open(&database_path).expect("stale count is not authoritative");
-    assert_eq!(session.graph().snapshot.geometry.page_count, 3);
+    assert_eq!(
+        session
+            .graph()
+            .expect("published graph")
+            .snapshot
+            .geometry
+            .page_count,
+        3
+    );
 }

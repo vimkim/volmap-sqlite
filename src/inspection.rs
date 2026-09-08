@@ -5,7 +5,11 @@ use std::path::Path;
 
 use serde::Serialize;
 use thiserror::Error;
-use uuid::Uuid;
+
+mod session;
+pub use session::{
+    Coverage, CoverageReason, InspectionSession, Progress, ScanControl, SessionState, SessionStatus,
+};
 
 const SQLITE_HEADER_SIZE: usize = 100;
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
@@ -14,6 +18,12 @@ const MAXIMUM_PAGE_NUMBER: u64 = 4_294_967_294;
 
 #[derive(Debug, Error)]
 pub enum InspectionError {
+    #[error("the snapshot was invalidated because an accepted input changed")]
+    Invalidated,
+    #[error("no published revision matches this request")]
+    RevisionUnavailable,
+    #[error("the inspection is no longer scanning")]
+    NotScanning,
     #[error("the database file could not be opened read-only: {0}")]
     Open(#[source] io::Error),
     #[error("the database header is incomplete")]
@@ -82,74 +92,47 @@ pub struct PageEntity {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectionGraph {
+    pub revision: u64,
+    pub coverage: Coverage,
     pub snapshot: DatabaseSnapshot,
     pub pages: Vec<PageEntity>,
 }
 
-#[derive(Debug)]
-pub struct InspectionSession {
-    graph: InspectionGraph,
-    // Retaining the read-only descriptor keeps the session tied to the accepted input.
-    _file: File,
-}
+fn read_snapshot(
+    file: &File,
+    snapshot_id: &str,
+    source: SourceIdentity,
+) -> Result<DatabaseSnapshot, InspectionError> {
+    let file_length = file.metadata().map_err(InspectionError::Open)?.len();
+    let mut header = [0_u8; SQLITE_HEADER_SIZE];
+    read_header(file, &mut header)?;
 
-impl InspectionSession {
-    /// Opens a stable `SQLite` main file as a read-only inspection session.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounded geometry error when the file cannot establish trustworthy `SQLite` page
-    /// boundaries, or an I/O error when the header cannot be read.
-    pub fn open(path: &Path) -> Result<Self, InspectionError> {
-        let file = File::open(path).map_err(InspectionError::Open)?;
-        let file_length = file.metadata().map_err(InspectionError::Open)?.len();
-        let mut header = [0_u8; SQLITE_HEADER_SIZE];
-        read_header(&file, &mut header)?;
-
-        if &header[..SQLITE_MAGIC.len()] != SQLITE_MAGIC {
-            return Err(InspectionError::InvalidMagic);
-        }
-
-        let page_size = decode_page_size(&header)?;
-        let reserved_bytes = header[20];
-        let usable_size = page_size
-            .checked_sub(u32::from(reserved_bytes))
-            .filter(|size| *size >= MINIMUM_USABLE_SIZE)
-            .ok_or(InspectionError::InvalidReservedBytes(reserved_bytes))?;
-        let text_encoding = decode_text_encoding(&header)?;
-        let page_count = decode_page_count(&header, file_length, page_size)?;
-
-        let mut pages = Vec::new();
-        pages
-            .try_reserve_exact(page_count as usize)
-            .map_err(|_| InspectionError::PageInventoryTooLarge)?;
-        pages.extend((1..=page_count).map(|number| PageEntity { number }));
-
-        let snapshot = DatabaseSnapshot {
-            id: Uuid::new_v4().to_string(),
-            source: SourceIdentity {
-                id: Uuid::new_v4().to_string(),
-                display_name: sanitized_display_name(path),
-            },
-            geometry: DatabaseGeometry {
-                page_size,
-                usable_size,
-                reserved_bytes,
-                page_count,
-                text_encoding,
-            },
-        };
-
-        Ok(Self {
-            graph: InspectionGraph { snapshot, pages },
-            _file: file,
-        })
+    if &header[..SQLITE_MAGIC.len()] != SQLITE_MAGIC {
+        return Err(InspectionError::InvalidMagic);
     }
 
-    #[must_use]
-    pub fn graph(&self) -> &InspectionGraph {
-        &self.graph
-    }
+    let page_size = decode_page_size(&header)?;
+    let reserved_bytes = header[20];
+    let usable_size = page_size
+        .checked_sub(u32::from(reserved_bytes))
+        .filter(|size| *size >= MINIMUM_USABLE_SIZE)
+        .ok_or(InspectionError::InvalidReservedBytes(reserved_bytes))?;
+    let text_encoding = decode_text_encoding(&header)?;
+    let page_count = decode_page_count(&header, file_length, page_size)?;
+
+    let snapshot = DatabaseSnapshot {
+        id: snapshot_id.to_owned(),
+        source,
+        geometry: DatabaseGeometry {
+            page_size,
+            usable_size,
+            reserved_bytes,
+            page_count,
+            text_encoding,
+        },
+    };
+
+    Ok(snapshot)
 }
 
 fn read_header(file: &File, header: &mut [u8; SQLITE_HEADER_SIZE]) -> Result<(), InspectionError> {

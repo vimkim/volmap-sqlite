@@ -6,9 +6,11 @@ import { expect, it, vi } from "vitest";
 it("boots the embedded production asset and renders its fetched page mosaic", async () => {
   document.body.innerHTML = '<div id="root"></div>';
   window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "embedded-snapshot" };
-  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+  vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve({
     ok: true,
-    json: () => Promise.resolve({
+    json: () => Promise.resolve(url.endsWith("/revisions/1") ? {
+      revision: 1,
+      coverage: { scope: "page_inventory", evaluated: 2, total: 2, nextPage: null, reason: "complete", remainder: 0 },
       snapshot: {
         id: "embedded-snapshot",
         source: { id: "embedded-source", displayName: "embedded.sqlite" },
@@ -21,8 +23,13 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
         },
       },
       pages: [{ number: 1 }, { number: 2 }],
+    } : {
+      snapshotId: "embedded-snapshot", source: { id: "embedded-source", displayName: "embedded.sqlite" },
+      state: "published", revision: 1, progress: { unit: "pages", completed: 2, total: 2 },
+      coverage: { scope: "page_inventory", evaluated: 2, total: 2, nextPage: null, reason: "complete", remainder: 0 },
+      diagnostic: null,
     }),
-  }));
+  })));
 
   // The production bundle is the exact asset embedded into the Rust executable.
   // @ts-expect-error Generated JavaScript intentionally has no declaration file.
@@ -30,5 +37,5 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
 
   await waitFor(() => expect(screen.getByRole("heading", { name: "Page atlas" })).toBeTruthy());
   expect(document.querySelectorAll("[data-page-number]")).toHaveLength(2);
-  expect(fetch).toHaveBeenCalledWith("/api/snapshots/embedded-snapshot", { cache: "no-store" });
+  expect(fetch).toHaveBeenCalledWith("/api/snapshots/embedded-snapshot/revisions/1", expect.objectContaining({ cache: "no-store" }));
 });

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::net::TcpListener;
-use volmap_sqlite::inspection::InspectionSession;
+use volmap_sqlite::inspection::{InspectionSession, ScanControl};
 use volmap_sqlite::web::atlas_router;
 
 #[derive(Debug, Parser)]
@@ -24,8 +24,8 @@ struct Arguments {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let arguments = Arguments::parse();
-    let session = Arc::new(InspectionSession::open(&arguments.database)?);
-    let display_name = &session.graph().snapshot.source.display_name;
+    let session = Arc::new(InspectionSession::begin(&arguments.database)?);
+    let display_name = session.status().source.display_name;
 
     if !arguments.listen.ip().is_loopback() {
         eprintln!(
@@ -37,6 +37,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let address = listener.local_addr()?;
     eprintln!("Inspecting {display_name}");
     eprintln!("Page atlas: http://{address}/");
-    axum::serve(listener, atlas_router(session)).await?;
+    let scan_session = Arc::clone(&session);
+    let worker = tokio::task::spawn_blocking(move || scan_session.scan(|_| ScanControl::Continue));
+    let shutdown_session = Arc::clone(&session);
+    let server = axum::serve(listener, atlas_router(session))
+        .with_graceful_shutdown(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            let _ = shutdown_session.stop(ScanControl::Cancel);
+        })
+        .await;
+    let _ = worker.await?;
+    server?;
     Ok(())
 }
