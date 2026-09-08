@@ -81,3 +81,11 @@ h2 { font-size: 20px; }
   .geometry > div { border-bottom: 1px solid #2b3038; }
   .content-grid { grid-template-columns: 1fr; }
 }
+
+.freelist-panel { margin: 1rem 0; padding: 1rem 1.4rem; border: 1px solid var(--line, #d8ded9); border-radius: 12px; background: #f0f6f3; }
+.freelist-panel button { margin-right: .5rem; }
+.page[data-role="freelist_trunk"] { border-color: #698361; background: #d9e8d5; }
+.page[data-role="freelist_leaf"] { border-color: #99b091; background: #eef5e9; }
+.page[data-role="conflicting"] { border-color: #a74a34; background: #f8dfd7; }
+.byte-segment.freelist_header { background: #698361; }
+.byte-segment.freelist_leaf_pointers { background: #99b091; }

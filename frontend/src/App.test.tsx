@@ -6,6 +6,7 @@ import { App, type InspectionGraph, type SessionStatus } from "./App";
 
 const graph: InspectionGraph = {
   revision: 1,
+  freelist: { firstTrunk: { value: 0, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 32, fileOffset: 32, length: 4 }, validationRule: "sqlite_header_first_freelist_trunk" } }, declaredCount: null, trunks: [], coverage: { reason: "complete", stoppingClaim: null, evaluatedPages: 0, remainder: 0 } },
   coverage: { scope: "page_inventory", evaluated: 3, total: 3, nextPage: null, reason: "complete", remainder: 0 },
   snapshot: {
     id: "snapshot-fixture",
@@ -19,7 +20,7 @@ const graph: InspectionGraph = {
     },
   },
   pages: [1, 2, 3].map(number => ({ number, detail: {
-    kind: "table_leaf", coverage: "complete", diagnostics: [], freeblocks: [],
+    allocationRole: null, kind: "table_leaf", coverage: "complete", diagnostics: [], freeblocks: [],
     header: { range: { pageOffset: 0, fileOffset: (number - 1) * 4096, length: 8 }, firstFreeblock: 0, cellCount: 1, contentStart: 4076, fragmentedBytes: 0, rightmostChild: null },
     regions: [{ kind: "cell_content", range: { pageOffset: 4076, fileOffset: (number - 1) * 4096 + 4076, length: 4 } }],
     cells: [{ identity: { pageNumber: number, index: 0 }, pointer: { pageOffset: 8, fileOffset: (number - 1) * 4096 + 8, length: 2 }, offset: 4076,
@@ -91,6 +92,57 @@ describe("page atlas", () => {
   });
 
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+
+  it("enters the freelist from header evidence and follows trunk and leaf links", async () => {
+    const allocation = structuredClone(graph);
+    Object.assign(allocation, {
+      freelist: {
+        firstTrunk: { value: 2, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 32, fileOffset: 32, length: 4 }, validationRule: "sqlite_header_first_freelist_trunk" } },
+        declaredCount: { value: 2, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 36, fileOffset: 36, length: 4 }, validationRule: "sqlite_header_freelist_page_count" } },
+        trunks: [{ page: { pageNumber: 2 }, leafCount: { value: 1, evidence: { page: { pageNumber: 2 }, range: { pageOffset: 4, fileOffset: 4100, length: 4 }, validationRule: "sqlite_freelist_leaf_count" } }, capacity: 1018, compatibilityCapacity: 1012 }],
+        coverage: { reason: "complete", stoppingClaim: null, evaluatedPages: 2, remainder: 0 },
+      },
+    });
+    allocation.relationshipClaims = [2, 3].map((target, index) => ({
+      id: `free:${target}`, kind: index === 0 ? "freelist_trunk" : "freelist_leaf",
+      source: { type: "page", pageNumber: target - 1 }, target: { pageNumber: target }, state: "validated",
+      evidence: { page: { pageNumber: target - 1 }, range: { pageOffset: index === 0 ? 32 : 8, fileOffset: index === 0 ? 32 : 4104, length: 4 }, validationRule: "sqlite_freelist_pointer" },
+    }));
+    allocation.relationships = allocation.relationshipClaims.map(claim => ({ claimId: claim.id, kind: claim.kind, source: claim.source, target: claim.target! }));
+    allocation.traversals = [{ kind: "freelist", origin: { type: "page", pageNumber: 1 }, validatedPrefix: [{ pageNumber: 2 }], stop: null }];
+    for (const page of allocation.pages.slice(1)) {
+      Object.assign(page.detail, { kind: null, allocationRole: page.number === 2 ? "freelist_trunk" : "freelist_leaf", cells: [], header: null });
+    }
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: () => Promise.resolve(url.endsWith("/revisions/1") ? allocation : published) })));
+    const { container } = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Inspect freelist" }));
+    expect(screen.getByRole("heading", { name: "Page 2" })).toBeTruthy();
+    expect(screen.getByText("Declared free pages: 2 · Evaluated: 2")).toBeTruthy();
+    expect(screen.getByText("Leaf count: 1")).toBeTruthy();
+    expect(container.querySelector('[data-page-number="2"]')?.getAttribute("data-role")).toBe("freelist_trunk");
+    fireEvent.click(screen.getByRole("button", { name: "Follow freelist leaf to page 3" }));
+    expect(screen.getByRole("heading", { name: "Page 3" })).toBeTruthy();
+    expect(screen.getByText("Freelist leaf contents are unused; no cells are interpreted.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Follow freelist leaf back to page 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "Follow freelist trunk back to page 1" }));
+    expect(screen.getByRole("heading", { name: "Page 1" })).toBeTruthy();
+  });
+
+  it.each([false, true])("shows empty or damaged allocation without a fabricated entry link (damaged=%s)", async damaged => {
+    const allocation = structuredClone(graph);
+    allocation.freelist.firstTrunk!.value = damaged ? 99 : 0;
+    allocation.freelist.coverage.reason = damaged ? "invalid_structure" : "complete";
+    allocation.freelist.coverage.remainder = damaged ? null : 0;
+    allocation.relationshipClaims = [];
+    allocation.relationships = [];
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: () => Promise.resolve(url.endsWith("/revisions/1") ? allocation : published) })));
+    render(<App />);
+    await screen.findByRole("region", { name: "Freelist allocation" });
+    expect(screen.queryByRole("button", { name: "Inspect freelist" })).toBeNull();
+    expect(Boolean(screen.queryByText("The freelist is empty."))).toBe(!damaged);
+    if (damaged) expect(screen.getByText("Allocation coverage: invalid structure · Remaining: unknown")).toBeTruthy();
+  });
 
   it("fetches the snapshot-scoped graph and renders the complete mosaic", async () => {
     const { container } = render(<App />);

@@ -96,6 +96,7 @@ pub struct ObservedEvidence {
     pub traversals: Vec<super::Traversal>,
     pub diagnostics: Vec<super::StructuralDiagnostic>,
     pub topology_coverage: super::TopologyCoverage,
+    pub freelist: super::FreelistEvidence,
 }
 
 /// Metadata excludes access time, so inspection reads cannot invalidate themselves.
@@ -365,12 +366,16 @@ impl SessionData {
         &mut self,
         state: SessionState,
         reason: CoverageReason,
-        topology: super::topology::Topology,
+        mut topology: super::topology::Topology,
     ) {
         let coverage = self.coverage(reason);
         if let Some(snapshot) = &self.snapshot {
-            let pages = Arc::try_unwrap(std::mem::replace(&mut self.pages, Arc::new(Vec::new())))
-                .unwrap_or_else(|pages| (*pages).clone());
+            let mut pages =
+                Arc::try_unwrap(std::mem::replace(&mut self.pages, Arc::new(Vec::new())))
+                    .unwrap_or_else(|pages| (*pages).clone());
+            for (number, page) in std::mem::take(&mut topology.freelist.page_overrides) {
+                pages[(number - 1) as usize] = page;
+            }
             self.published = Some(Arc::new(InspectionGraph {
                 revision: 1,
                 coverage: coverage.clone(),
@@ -381,6 +386,7 @@ impl SessionData {
                 traversals: topology.traversals,
                 diagnostics: topology.diagnostics,
                 topology_coverage: topology.coverage,
+                freelist: topology.freelist,
             }));
             self.status.revision = Some(1);
         }
@@ -811,9 +817,28 @@ impl InspectionSession {
         let published = d.published.as_deref();
         let observed = d.observed_topology.as_ref();
         Some(ObservedEvidence {
+            freelist: published.map_or_else(
+                || {
+                    observed.map_or_else(super::FreelistEvidence::uninspected, |topology| {
+                        topology.freelist.clone()
+                    })
+                },
+                |revision| revision.freelist.clone(),
+            ),
             coverage: d.coverage(CoverageReason::InputChanged),
             snapshot,
-            pages: published.map_or_else(|| (*d.pages).clone(), |revision| revision.pages.clone()),
+            pages: published.map_or_else(
+                || {
+                    let mut pages = (*d.pages).clone();
+                    if let Some(topology) = observed {
+                        for (number, page) in &topology.freelist.page_overrides {
+                            pages[(*number - 1) as usize] = page.clone();
+                        }
+                    }
+                    pages
+                },
+                |revision| revision.pages.clone(),
+            ),
             relationship_claims: published.map_or_else(
                 || observed.map_or_else(Vec::new, |topology| topology.claims.clone()),
                 |revision| revision.relationship_claims.clone(),

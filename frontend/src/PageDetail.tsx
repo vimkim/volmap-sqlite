@@ -10,7 +10,7 @@ export interface PhysicalEvidence {
 }
 export interface RelationshipClaim {
   id: string;
-  kind: "btree_child" | "overflow";
+  kind: "btree_child" | "overflow" | "freelist_trunk" | "freelist_leaf";
   source: EntityIdentity;
   target: PageIdentity | null;
   evidence: PhysicalEvidence;
@@ -18,7 +18,7 @@ export interface RelationshipClaim {
 }
 export interface Relationship {
   claimId: string;
-  kind: "btree_child" | "overflow";
+  kind: "btree_child" | "overflow" | "freelist_trunk" | "freelist_leaf";
   source: EntityIdentity;
   target: PageIdentity;
 }
@@ -30,6 +30,7 @@ export interface StructuralDiagnostic {
   containment: "traversal_stopped" | "relationship_excluded";
 }
 export interface PageEvidence {
+  allocationRole: "freelist_trunk" | "freelist_leaf" | "conflicting" | null;
   kind: "table_leaf" | "table_interior" | "index_leaf" | "index_interior" | null;
   coverage: "complete" | "partial" | "unsupported";
   header: { range: ByteRange; firstFreeblock: number; cellCount: number; contentStart: number; fragmentedBytes: number; rightmostChild: number | null } | null;
@@ -47,7 +48,7 @@ export interface PageEvidence {
   diagnostics: string[];
 }
 
-export function roleLabel(kind: PageEvidence["kind"]): string {
+export function roleLabel(kind: PageEvidence["kind"] | PageEvidence["allocationRole"]): string {
   return kind ? kind.replaceAll("_", " ") : "Unknown / opaque";
 }
 
@@ -111,7 +112,7 @@ export function PageDetail({
     </section>
     <section aria-label="Page relationships">
       <h3>Relationship claims</h3>
-      {claims.length === 0 ? <p className="evidence-note">No B-tree child or overflow claims touch this page.</p> :
+      {claims.length === 0 ? <p className="evidence-note">No structural relationship claims touch this page.</p> :
       <div className="table-scroll"><table aria-label="Relationship claims"><thead><tr><th>Relationship</th><th>Direction</th><th>Target</th><th>Evidence</th><th>Validation</th></tr></thead>
         <tbody>{claims.map(claim => {
           const outgoing = sourcePage(claim.source) === pageNumber;
@@ -132,6 +133,7 @@ export function PageDetail({
         })}</tbody>
       </table></div>}
     </section>
+    {detail.allocationRole === "freelist_leaf" && <p>Freelist leaf contents are unused; no cells are interpreted.</p>}
     <h3>Cell inventory</h3>
     <p className="evidence-note">Identity uses the zero-based cell-pointer-array index, not the rowid or key. Child and overflow pointers link to the validated relationship evidence above.</p>
     <div className="table-scroll"><table aria-label="Cell inventory"><thead><tr><th>Physical identity</th><th>Pointer / offset</th><th>Validated extent</th><th>Structural facts</th><th>Record structure</th></tr></thead>

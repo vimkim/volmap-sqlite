@@ -115,6 +115,19 @@ fn inspect(path: &Path, bytes: &[u8]) -> Value {
     serde_json::to_value(&*session.graph().unwrap()).unwrap()
 }
 
+// Allocation claims share the graph; these fixtures assert only B-tree/overflow contracts.
+fn storage_claims(graph: &Value) -> Value {
+    Value::Array(
+        graph["relationshipClaims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|claim| matches!(claim["kind"].as_str(), Some("btree_child" | "overflow")))
+            .cloned()
+            .collect(),
+    )
+}
+
 fn assert_exact_topology_stop(coverage: TopologyCoverage, reason: TopologyCoverageReason) {
     assert_eq!(coverage.reason, reason);
     assert!(
@@ -161,7 +174,7 @@ fn valid_btree_claims_resolve_with_bidirectional_navigation_and_prefixes() {
     let graph = inspect(&directory.path().join("tree.sqlite"), &valid_table_btree());
 
     assert_eq!(
-        graph["relationshipClaims"],
+        storage_claims(&graph),
         json!([
             {
                 "id": "btree:page:1:cell:0",
@@ -472,7 +485,7 @@ fn overflow_claims_trace_only_linkage_bytes_and_publish_the_validated_prefix() {
         &valid_overflow_chain(),
     );
     assert_eq!(
-        graph["relationshipClaims"],
+        storage_claims(&graph),
         json!([
             {
                 "id": "overflow:cell:1:0",
@@ -756,6 +769,7 @@ fn cancelled_inventory_uses_coverage_stops_without_corruption_diagnostics() {
         graph
             .relationship_claims
             .iter()
+            .filter(|claim| claim.kind == volmap_sqlite::inspection::RelationshipKind::BtreeChild)
             .all(|claim| claim.state == volmap_sqlite::inspection::RelationshipState::Unresolved)
     );
     assert!(

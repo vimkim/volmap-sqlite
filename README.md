@@ -71,6 +71,21 @@ page and byte. Overflow traversal reads only the four-byte linkage fields and ne
 adds overflow payload bytes to the broad graph. Global page-role reconciliation remains
 later work.
 
+Freelist inspection starts at the header's first-trunk pointer and declared page
+count. The graph records bounded trunk headers, declared leaf pointers, distinct
+trunk/leaf roles, and a validated trunk prefix. Allocation coverage is independent
+of page-inventory coverage: invalid counts, repeated claims, cycles, missing targets,
+and operational stops retain evidence and report an unknown remainder. Unused leaf
+contents and unused trunk slots never become active B-tree cells or relationships.
+Independently supported storage links that also target a freelist page retain both
+claims as conflicting evidence. The atlas provides a freelist entry point, trunk
+navigation, allocation colors, byte regions, and source/target relationship links.
+
+Trunk capacity uses usable bytes, excluding the reserved region. The reader accepts
+all format-valid declared slots, including the final six slots that SQLite writers
+avoid for compatibility with versions before 3.6.0. Those slots are ignored whenever
+they lie outside the declared leaf array. See [SQLite's freelist format](https://sqlite.org/fileformat2.html#the_freelist).
+
 The parser follows the [SQLite file format](https://www.sqlite.org/fileformat.html),
 including its local-payload formulas. It reads one bounded page at a time, retains
 structural facts rather than page buffers, and treats reserved bytes as opaque.

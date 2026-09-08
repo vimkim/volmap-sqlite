@@ -10,6 +10,7 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
     ok: true,
     json: () => Promise.resolve(url.endsWith("/revisions/1") ? {
       revision: 1,
+      freelist: { firstTrunk: null, declaredCount: null, trunks: [], coverage: { reason: "not_inspected", stoppingClaim: null, evaluatedPages: 0, remainder: null } },
       coverage: { scope: "page_inventory", evaluated: 2, total: 2, nextPage: null, reason: "complete", remainder: 0 },
       snapshot: {
         id: "embedded-snapshot",
@@ -22,7 +23,7 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
           textEncoding: "utf8",
         },
       },
-      pages: [1, 2].map(number => ({ number, detail: { kind: null, coverage: "unsupported", header: null, regions: [], cells: [], freeblocks: [], diagnostics: [] } })),
+      pages: [1, 2].map(number => ({ number, detail: { allocationRole: null, kind: null, coverage: "unsupported", header: null, regions: [], cells: [], freeblocks: [], diagnostics: [] } })),
       relationshipClaims: [], relationships: [], traversals: [], diagnostics: [],
       topologyCoverage: {
         reason: "complete", phase: "complete", evaluated: 0, total: 0, next: null, remainder: 0, nextPhase: null,

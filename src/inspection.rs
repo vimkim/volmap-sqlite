@@ -7,6 +7,11 @@ use serde::Serialize;
 use thiserror::Error;
 
 mod btree;
+mod freelist;
+pub use freelist::{
+    AllocationRole, FreelistCoverage, FreelistCoverageReason, FreelistEvidence, FreelistField,
+    FreelistTrunk,
+};
 mod session;
 mod topology;
 pub use btree::{
@@ -114,6 +119,7 @@ pub struct InspectionGraph {
     pub traversals: Vec<Traversal>,
     pub diagnostics: Vec<StructuralDiagnostic>,
     pub topology_coverage: TopologyCoverage,
+    pub freelist: FreelistEvidence,
 }
 
 fn read_snapshot(

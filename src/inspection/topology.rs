@@ -25,6 +25,8 @@ pub enum EntityIdentity {
 #[serde(rename_all = "snake_case")]
 pub enum RelationshipKind {
     BtreeChild,
+    FreelistTrunk,
+    FreelistLeaf,
     Overflow,
 }
 
@@ -56,7 +58,7 @@ pub struct RelationshipClaim {
     pub evidence: PhysicalEvidence,
     pub state: RelationshipState,
     #[serde(skip)]
-    stop_reason: Option<TraversalStopReason>,
+    pub(super) stop_reason: Option<TraversalStopReason>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -72,6 +74,7 @@ pub struct Relationship {
 #[serde(rename_all = "snake_case")]
 pub enum TraversalKind {
     Btree,
+    Freelist,
     Overflow,
 }
 
@@ -134,6 +137,8 @@ pub enum TopologyPhase {
     OverflowInspection,
     OverflowReconciliation,
     OverflowRelationshipNormalization,
+    FreelistInspection,
+    AllocationReconciliation,
     Complete,
 }
 
@@ -190,7 +195,7 @@ impl WorkControl {
         }
     }
 
-    fn traversal_reason(&self) -> Option<TraversalStopReason> {
+    pub(super) fn traversal_reason(&self) -> Option<TraversalStopReason> {
         match self.stop_reason() {
             Some(TopologyCoverageReason::Cancelled) => Some(TraversalStopReason::Cancelled),
             Some(TopologyCoverageReason::OperatorStop) => Some(TraversalStopReason::OperatorStop),
@@ -206,7 +211,7 @@ impl WorkControl {
         self.budget_exhausted.store(1, Ordering::Release);
     }
 
-    fn mark_aggregate_budget_exhausted(&self) {
+    pub(super) fn mark_aggregate_budget_exhausted(&self) {
         self.mark_budget_exhausted();
         self.aggregate_budget_exhausted.store(1, Ordering::Release);
     }
@@ -215,7 +220,7 @@ impl WorkControl {
         self.aggregate_budget_exhausted.load(Ordering::Acquire) != 0
     }
 
-    fn begin_phase(&self, phase: TopologyPhase, total: Option<u64>) {
+    pub(super) fn begin_phase(&self, phase: TopologyPhase, total: Option<u64>) {
         if self.stopped() {
             return;
         }
@@ -227,13 +232,13 @@ impl WorkControl {
         self.phase_complete.store(0, Ordering::Release);
     }
 
-    fn advance(&self, phase: TopologyPhase) {
+    pub(super) fn advance(&self, phase: TopologyPhase) {
         if self.phase.load(Ordering::Acquire) == phase as u8 {
             self.evaluated.fetch_add(1, Ordering::AcqRel);
         }
     }
 
-    fn finish_phase(&self, phase: TopologyPhase) {
+    pub(super) fn finish_phase(&self, phase: TopologyPhase) {
         if self.phase.load(Ordering::Acquire) == phase as u8 {
             self.phase_complete.store(1, Ordering::Release);
         }
@@ -285,6 +290,8 @@ fn decode_phase(value: u8) -> TopologyPhase {
         7 => TopologyPhase::OverflowInspection,
         8 => TopologyPhase::OverflowReconciliation,
         9 => TopologyPhase::OverflowRelationshipNormalization,
+        10 => TopologyPhase::FreelistInspection,
+        11 => TopologyPhase::AllocationReconciliation,
         _ => TopologyPhase::Complete,
     }
 }
@@ -303,7 +310,11 @@ fn next_phase(phase: TopologyPhase) -> Option<TopologyPhase> {
         TopologyPhase::OverflowReconciliation => {
             Some(TopologyPhase::OverflowRelationshipNormalization)
         }
-        TopologyPhase::OverflowRelationshipNormalization => Some(TopologyPhase::Complete),
+        TopologyPhase::OverflowRelationshipNormalization => {
+            Some(TopologyPhase::AllocationReconciliation)
+        }
+        TopologyPhase::AllocationReconciliation => Some(TopologyPhase::Complete),
+        TopologyPhase::FreelistInspection => Some(TopologyPhase::BtreeClaimCollection),
         TopologyPhase::Complete => None,
     }
 }
@@ -443,6 +454,7 @@ pub struct StructuralDiagnostic {
 }
 
 pub(super) struct Topology {
+    pub freelist: super::FreelistEvidence,
     pub claims: Vec<RelationshipClaim>,
     pub relationships: Vec<Relationship>,
     pub traversals: Vec<Traversal>,
@@ -453,6 +465,7 @@ pub(super) struct Topology {
 impl Topology {
     pub(super) fn empty(budget: TraversalBudget) -> Self {
         Self {
+            freelist: super::FreelistEvidence::uninspected(),
             claims: Vec::new(),
             relationships: Vec::new(),
             traversals: Vec::new(),
@@ -491,10 +504,43 @@ impl OverflowTopology {
     }
 }
 
+/// Topology sees allocation projections without cloning the structural inventory.
+struct PageInventory<'a> {
+    pages: &'a [PageEntity],
+    overrides: &'a std::collections::HashMap<u32, PageEntity>,
+}
+
+impl PageInventory<'_> {
+    fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    fn get(&self, index: usize) -> Option<&PageEntity> {
+        self.pages
+            .get(index)
+            .map(|page| self.overrides.get(&page.number).unwrap_or(page))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &PageEntity> {
+        self.pages
+            .iter()
+            .map(|page| self.overrides.get(&page.number).unwrap_or(page))
+    }
+}
+
+impl std::ops::Index<usize> for PageInventory<'_> {
+    type Output = PageEntity;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index)
+            .expect("index is bounded by the inspected inventory")
+    }
+}
+
 struct OverflowSource<'a> {
     file: &'a File,
     geometry: &'a DatabaseGeometry,
-    pages: &'a [PageEntity],
+    pages: &'a PageInventory<'a>,
     max_pages: u32,
     max_total_pages: u64,
     cancelled: &'a WorkControl,
@@ -507,6 +553,17 @@ pub(super) fn inspect(
     budget: TraversalBudget,
     cancelled: &WorkControl,
 ) -> Topology {
+    let mut allocation = super::freelist::inspect(file, geometry, pages, budget, cancelled);
+    if cancelled.stopped() || cancelled.aggregate_budget_exhausted() {
+        allocation.coverage = cancelled.coverage(budget);
+        return allocation;
+    }
+    let inventory = PageInventory {
+        pages,
+        overrides: &allocation.freelist.page_overrides,
+    };
+    let pages = &inventory;
+    let allocation_pages = u64::from(allocation.freelist.coverage.evaluated_pages);
     let mut claims = collect_btree_claims(pages, cancelled);
     let mut diagnostics = validate_btree_claims(geometry.page_count, pages, &mut claims, cancelled);
     let (mut relationships, btree_relationships_complete) = normalize_relationships(
@@ -521,7 +578,7 @@ pub(super) fn inspect(
             &claims,
             pages.len() == geometry.page_count as usize,
             budget.max_btree_pages(),
-            budget.max_total_pages(),
+            budget.max_total_pages().saturating_sub(allocation_pages),
             cancelled,
         )
     } else {
@@ -530,7 +587,14 @@ pub(super) fn inspect(
     let mut overflow = if cancelled.stopped() || cancelled.aggregate_budget_exhausted() {
         OverflowTopology::empty(traversal_pages)
     } else {
-        inspect_overflow(file, geometry, pages, budget, traversal_pages, cancelled)
+        inspect_overflow(
+            file,
+            geometry,
+            pages,
+            budget,
+            traversal_pages + allocation_pages,
+            cancelled,
+        )
     };
     let mut overflow_relationships =
         if cancelled.stopped() || cancelled.aggregate_budget_exhausted() {
@@ -547,8 +611,21 @@ pub(super) fn inspect(
     claims.append(&mut overflow.claims);
     traversals.append(&mut overflow.traversals);
     diagnostics.append(&mut overflow.diagnostics);
+    if !cancelled.stopped() && !cancelled.aggregate_budget_exhausted() {
+        super::freelist::reconcile_storage(
+            &mut allocation,
+            &mut claims,
+            &mut traversals,
+            cancelled,
+        );
+    }
+    relationships.append(&mut allocation.relationships);
+    claims.append(&mut allocation.claims);
+    traversals.append(&mut allocation.traversals);
+    diagnostics.append(&mut allocation.diagnostics);
     cancelled.complete();
     Topology {
+        freelist: allocation.freelist,
         claims,
         relationships,
         traversals,
@@ -582,13 +659,16 @@ fn normalize_relationships(
     (relationships, true)
 }
 
-fn collect_btree_claims(pages: &[PageEntity], cancelled: &WorkControl) -> Vec<RelationshipClaim> {
+fn collect_btree_claims(
+    pages: &PageInventory<'_>,
+    cancelled: &WorkControl,
+) -> Vec<RelationshipClaim> {
     let mut claims = Vec::new();
     cancelled.begin_phase(
         TopologyPhase::BtreeClaimCollection,
         Some(pages.len() as u64),
     );
-    for page in pages {
+    for page in pages.iter() {
         if cancelled.stopped() {
             return claims;
         }
@@ -661,7 +741,7 @@ fn collect_btree_claims(pages: &[PageEntity], cancelled: &WorkControl) -> Vec<Re
 
 fn validate_btree_claims(
     page_count: u32,
-    pages: &[PageEntity],
+    pages: &PageInventory<'_>,
     claims: &mut [RelationshipClaim],
     cancelled: &WorkControl,
 ) -> Vec<StructuralDiagnostic> {
@@ -705,7 +785,7 @@ fn downgrade_validated_claims(claims: &mut [RelationshipClaim], kind: Relationsh
 
 fn validate_btree_claim(
     page_count: u32,
-    pages: &[PageEntity],
+    pages: &PageInventory<'_>,
     claim: &mut RelationshipClaim,
 ) -> Option<StructuralDiagnostic> {
     let source_number = source_page(&claim.source);
@@ -909,7 +989,7 @@ fn conflicting_claims_bounded(
 fn inspect_overflow(
     file: &File,
     geometry: &DatabaseGeometry,
-    pages: &[PageEntity],
+    pages: &PageInventory<'_>,
     budget: TraversalBudget,
     traversal_pages: u64,
     cancelled: &WorkControl,
@@ -927,7 +1007,7 @@ fn inspect_overflow(
         return result;
     };
     cancelled.begin_phase(TopologyPhase::OverflowInspection, Some(cell_count));
-    for page in pages {
+    for page in pages.iter() {
         if cancelled.aggregate_budget_exhausted() {
             downgrade_validated_claims(&mut result.claims, RelationshipKind::Overflow);
             return result;
@@ -961,10 +1041,10 @@ fn inspect_overflow(
     result
 }
 
-fn count_overflow_cells(pages: &[PageEntity], cancelled: &WorkControl) -> Option<u64> {
+fn count_overflow_cells(pages: &PageInventory<'_>, cancelled: &WorkControl) -> Option<u64> {
     cancelled.begin_phase(TopologyPhase::OverflowInspection, None);
     let mut cell_count = 0_u64;
-    for page in pages {
+    for page in pages.iter() {
         if cancelled.stopped() {
             return None;
         }
@@ -1395,7 +1475,7 @@ fn read_u32(file: &File, offset: u64) -> Option<u32> {
 
 fn validate_overflow_target(
     page_count: u32,
-    pages: &[PageEntity],
+    pages: &PageInventory<'_>,
     claim: &mut RelationshipClaim,
     missing_code: &'static str,
     out_of_range_code: &'static str,
@@ -1436,7 +1516,7 @@ fn validate_overflow_target(
         );
         return;
     }
-    if page.detail.kind.is_some() {
+    if page.detail.kind.is_some() || page.detail.allocation_role.is_some() {
         invalidate_overflow_claim(
             claim,
             RelationshipState::Conflicting,
@@ -1564,7 +1644,7 @@ fn btree_cycles(
 }
 
 fn btree_traversals(
-    pages: &[PageEntity],
+    pages: &PageInventory<'_>,
     claims: &[RelationshipClaim],
     inventory_complete: bool,
     max_pages: u32,

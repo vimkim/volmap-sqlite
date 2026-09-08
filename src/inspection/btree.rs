@@ -96,6 +96,7 @@ pub struct Freeblock {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageDetail {
+    pub allocation_role: Option<super::AllocationRole>,
     /// A locally validated B-tree header claim; global role reconciliation is separate.
     pub kind: Option<Kind>,
     pub header: Option<BtreeHeader>,
@@ -169,6 +170,7 @@ impl Page<'_> {
     fn inspect(&self) -> PageDetail {
         let base = if self.number == 1 { 100 } else { 0 };
         let mut detail = PageDetail {
+            allocation_role: None,
             kind: None,
             header: None,
             regions: vec![],
@@ -614,6 +616,7 @@ pub(super) fn read_page(file: &File, number: u32, geometry: &DatabaseGeometry) -
     let offset = u64::from(number - 1) * u64::from(geometry.page_size);
     if file.read_exact_at(&mut bytes, offset).is_err() {
         return PageDetail {
+            allocation_role: None,
             kind: None,
             header: None,
             regions: vec![],

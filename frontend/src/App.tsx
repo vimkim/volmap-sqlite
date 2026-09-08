@@ -4,11 +4,14 @@ import {
   type RelationshipClaim, type StructuralDiagnostic,
 } from "./PageDetail";
 
+import { Freelist, type FreelistEvidence } from "./Freelist";
+
 type TextEncoding = "utf8" | "utf16_le" | "utf16_be";
-type TopologyPhase = "btree_claim_collection" | "btree_claim_validation" | "btree_parent_reconciliation" | "btree_cycle_reconciliation" | "btree_relationship_normalization" | "btree_traversal" | "overflow_inspection" | "overflow_reconciliation" | "overflow_relationship_normalization" | "complete";
+type TopologyPhase = "allocation_reconciliation" | "freelist_inspection" | "btree_claim_collection" | "btree_claim_validation" | "btree_parent_reconciliation" | "btree_cycle_reconciliation" | "btree_relationship_normalization" | "btree_traversal" | "overflow_inspection" | "overflow_reconciliation" | "overflow_relationship_normalization" | "complete";
 
 export interface InspectionGraph {
   revision: number;
+  freelist: FreelistEvidence;
   coverage: Coverage;
   snapshot: {
     id: string;
@@ -25,7 +28,7 @@ export interface InspectionGraph {
   relationshipClaims: RelationshipClaim[];
   relationships: Relationship[];
   traversals: Array<{
-    kind: "btree" | "overflow";
+    kind: "btree" | "overflow" | "freelist";
     origin: { type: "page" | "cell"; pageNumber: number; cellIndex?: number };
     validatedPrefix: Array<{ pageNumber: number }>;
     stop: {
@@ -105,6 +108,10 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
     };
   }, [graph.pages, graph.relationshipClaims, graph.relationships]);
   const active = projection.pagesByNumber.get(selectedPage);
+  const freelistTraversal = graph.traversals.find(traversal => traversal.kind === "freelist");
+  const firstFreelistLink = graph.relationships.find(relationship =>
+    relationship.kind === "freelist_trunk" && relationship.source.pageNumber === 1);
+  const activeTrunk = graph.freelist.trunks.find(trunk => trunk.page.pageNumber === selectedPage);
   const selectPage = (page: number) => {
     setSelectedPage(page);
     setEvidenceLocus(null);
@@ -145,6 +152,8 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
         <GeometryFact label="Aggregate traversal limit" value={BigInt(graph.topologyCoverage.traversalBudget.maxTotalPages).toLocaleString()} />
       </section>
 
+      <Freelist evidence={graph.freelist} prefix={freelistTraversal?.validatedPrefix ?? []}
+        firstNavigable={firstFreelistLink?.target.pageNumber ?? null} onSelectPage={selectPage} />
       <div className="content-grid">
         <section className="atlas-panel">
           <div className="section-heading">
@@ -159,7 +168,7 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
               <button
                 className={page.number === selectedPage ? "page selected" : "page"}
                 data-page-number={page.number}
-                data-role={page.detail.kind ?? "unknown"}
+                data-role={page.detail.allocationRole ?? page.detail.kind ?? "unknown"}
                 aria-pressed={page.number === selectedPage}
                 key={page.number}
                 onClick={() => selectPage(page.number)}
@@ -167,7 +176,7 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
               >
                 <span>Page</span>
                 <strong>{page.number}</strong>
-                <span>{roleLabel(page.detail.kind)}</span>
+                <span>{roleLabel(page.detail.allocationRole ?? page.detail.kind)}</span>
                 {page.detail.coverage === "partial" && <span>Partial</span>}
               </button>
             ))}
@@ -181,11 +190,11 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
           <dl>
             <div><dt>Identity</dt><dd>page:{selectedPage}</dd></div>
             <div><dt>Byte range</dt><dd>{((selectedPage - 1) * geometry.pageSize).toLocaleString()}–{(selectedPage * geometry.pageSize - 1).toLocaleString()}</dd></div>
-            <div><dt>Role claim</dt><dd>{active ? roleLabel(active.detail.kind) : "Unknown"}</dd></div>
+            <div><dt>Role claim</dt><dd>{active ? roleLabel(active.detail.allocationRole ?? active.detail.kind) : "Unknown"}</dd></div>
           </dl>
           </>}
           <p className="evidence-note">
-            Select a page to inspect its structural map and physical cell inventory below. Global role attribution is not yet evaluated.
+            Select a page to inspect its structural map and physical cell inventory below. Freelist roles come from allocation evidence. Other global role attribution is not yet evaluated.
           </p>
         </aside>
       </div>
@@ -208,6 +217,12 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
             </button>)}
           </li>;
         })}</ul>
+      </section>}
+      {activeTrunk && <section className="freelist-panel" aria-label="Freelist trunk evidence">
+        <h2>Trunk {activeTrunk.page.pageNumber}</h2>
+        <p>Leaf count: {activeTrunk.leafCount.value}</p>
+        <p>Capacity: {activeTrunk.capacity} · Backward-compatible writer capacity: {activeTrunk.compatibilityCapacity}</p>
+        <p>Leaf-count evidence: page bytes [4, 8), main-file bytes [{activeTrunk.leafCount.evidence.range.fileOffset}, {activeTrunk.leafCount.evidence.range.fileOffset + 4}).</p>
       </section>}
       {active && <PageDetail
         detail={active.detail}
