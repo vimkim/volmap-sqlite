@@ -8,7 +8,7 @@ export interface PageEvidence {
     identity: { pageNumber: number; index: number }; pointer: ByteRange; offset: number;
     range: ByteRange | null; rowid: string | null; leftChild: number | null;
     payloadSize: number | null; localPayload: ByteRange | null; overflowPage: number | null;
-    record: { state: "complete" | "invalid" | "needs_overflow"; headerSize: number | null; serialTypes: string[] } | null;
+    record: { state: "complete" | "invalid" | "needs_overflow" | "unsupported_format"; headerSize: number | null; serialTypes: string[] } | null;
     diagnostic: string | null;
   }>;
   freeblocks: Array<{ offset: number; next: number; range: ByteRange | null; diagnostic: string | null }>;

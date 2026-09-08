@@ -8,7 +8,9 @@ use thiserror::Error;
 
 mod btree;
 mod session;
-pub use btree::{ByteRange, CellDetail, CellIdentity, PageDetail};
+pub use btree::{
+    ByteRange, CellDetail, CellIdentity, Kind as BtreeKind, LocalCoverage, PageDetail, RecordState,
+};
 pub use session::{
     Coverage, CoverageReason, InspectionSession, Progress, ScanControl, SessionState, SessionStatus,
 };
@@ -68,6 +70,7 @@ pub struct DatabaseGeometry {
     pub reserved_bytes: u8,
     pub page_count: u32,
     pub text_encoding: TextEncoding,
+    pub schema_format: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -132,6 +135,7 @@ fn read_snapshot(
             reserved_bytes,
             page_count,
             text_encoding,
+            schema_format: decode_u32(&header, 44),
         },
     };
 

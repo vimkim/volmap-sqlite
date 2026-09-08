@@ -270,3 +270,73 @@ fn freeblock_damage_is_contained_and_overlap_with_a_cell_is_not_trusted() {
     assert_eq!(page["cells"][1]["diagnostic"], "overlapping_allocation");
     assert_eq!(page["coverage"], "partial");
 }
+
+#[test]
+fn a_conflicting_freeblock_cannot_authorize_the_next_link() {
+    let mut bytes = small_image();
+    bytes[513..515].copy_from_slice(&496_u16.to_be_bytes());
+    bytes[517..519].copy_from_slice(&496_u16.to_be_bytes());
+    bytes[520..522].copy_from_slice(&496_u16.to_be_bytes());
+    bytes[1008..1012].copy_from_slice(&[1, 248, 0, 8]);
+    bytes[1016..1020].copy_from_slice(&[0, 0, 0, 4]);
+    let graph = inspect_bytes(&bytes);
+    let page = &graph["pages"][1]["detail"];
+    assert_eq!(page["freeblocks"].as_array().unwrap().len(), 1);
+    assert!(page["freeblocks"][0]["range"].is_null());
+    assert_eq!(page["cells"][1]["record"]["state"], "complete");
+}
+
+#[test]
+fn page_one_rejects_index_headers_without_losing_database_header_evidence() {
+    for kind in [2, 10] {
+        let mut bytes = small_image();
+        bytes[100] = kind;
+        let graph = inspect_bytes(&bytes);
+        let page = &graph["pages"][0]["detail"];
+        assert!(page["kind"].is_null());
+        assert!(page["header"].is_null());
+        assert_eq!(page["diagnostics"], json!(["invalid_page_one_kind"]));
+        assert_eq!(page["regions"][0]["kind"], "database_header");
+        assert_eq!(graph["pages"][1]["detail"]["coverage"], "complete");
+    }
+}
+
+#[test]
+fn a_leading_freeblock_requires_a_preceding_cell() {
+    let mut bytes = small_image();
+    bytes[515..517].copy_from_slice(&0_u16.to_be_bytes());
+    bytes[513..515].copy_from_slice(&508_u16.to_be_bytes());
+    bytes[517..519].copy_from_slice(&508_u16.to_be_bytes());
+    bytes[1020..1024].copy_from_slice(&[0, 0, 0, 4]);
+    let graph = inspect_bytes(&bytes);
+    let page = &graph["pages"][1]["detail"];
+    assert_eq!(page["coverage"], "partial");
+    assert_eq!(
+        page["diagnostics"],
+        json!(["freeblock_without_preceding_cell"])
+    );
+    assert!(page["freeblocks"][0]["range"].is_null());
+    assert_eq!(page["header"]["cellCount"], 0);
+}
+
+#[test]
+fn serial_types_obey_the_database_schema_format() {
+    for format in [1_u32, 2, 3, 5] {
+        let mut bytes = small_image();
+        bytes[44..48].copy_from_slice(&format.to_be_bytes());
+        let graph = inspect_bytes(&bytes);
+        let page = &graph["pages"][1]["detail"];
+        let record = &page["cells"][0]["record"];
+        assert_eq!(
+            record["state"],
+            if format == 5 {
+                "unsupported_format"
+            } else {
+                "invalid"
+            }
+        );
+        assert_eq!(record["serialTypes"], json!([]));
+        assert_eq!(page["coverage"], "partial");
+        assert!(page["cells"][0]["range"].is_object());
+    }
+}

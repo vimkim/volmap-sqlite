@@ -43,10 +43,27 @@ pub struct CellIdentity {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordDetail {
-    pub state: &'static str,
+    pub state: RecordState,
     pub header_size: Option<u64>,
     /// Decimal strings preserve all 64 bits across JSON/JavaScript.
     pub serial_types: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordState {
+    Complete,
+    Invalid,
+    NeedsOverflow,
+    UnsupportedFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalCoverage {
+    Complete,
+    Partial,
+    Unsupported,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -78,13 +95,34 @@ pub struct Freeblock {
 #[serde(rename_all = "camelCase")]
 pub struct PageDetail {
     /// A locally validated B-tree header claim; global role reconciliation is separate.
-    pub kind: Option<&'static str>,
+    pub kind: Option<Kind>,
     pub header: Option<BtreeHeader>,
     pub regions: Vec<Region>,
     pub cells: Vec<CellDetail>,
     pub freeblocks: Vec<Freeblock>,
     pub diagnostics: Vec<&'static str>,
-    pub coverage: &'static str,
+    pub coverage: LocalCoverage,
+}
+
+impl PageDetail {
+    fn finish_coverage(&mut self) {
+        self.coverage = if !self.diagnostics.is_empty()
+            || self
+                .freeblocks
+                .iter()
+                .any(|block| block.diagnostic.is_some())
+            || self.cells.iter().any(|cell| {
+                cell.diagnostic.is_some()
+                    || cell
+                        .record
+                        .as_ref()
+                        .is_some_and(|record| record.state != RecordState::Complete)
+            }) {
+            LocalCoverage::Partial
+        } else {
+            LocalCoverage::Complete
+        };
+    }
 }
 
 struct Page<'a> {
@@ -92,10 +130,12 @@ struct Page<'a> {
     number: u32,
     size: u32,
     usable: usize,
+    schema_format: u32,
 }
 
-#[derive(Clone, Copy)]
-enum Kind {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
     TableLeaf,
     TableInterior,
     IndexLeaf,
@@ -103,14 +143,6 @@ enum Kind {
 }
 
 impl Kind {
-    fn name(self) -> &'static str {
-        match self {
-            Self::TableLeaf => "table_leaf",
-            Self::TableInterior => "table_interior",
-            Self::IndexLeaf => "index_leaf",
-            Self::IndexInterior => "index_interior",
-        }
-    }
     fn interior(self) -> bool {
         matches!(self, Self::TableInterior | Self::IndexInterior)
     }
@@ -141,7 +173,7 @@ impl Page<'_> {
             cells: vec![],
             freeblocks: vec![],
             diagnostics: vec![],
-            coverage: "unsupported",
+            coverage: LocalCoverage::Unsupported,
         };
         if base != 0 {
             detail.regions.push(self.region("database_header", 0, base));
@@ -159,6 +191,11 @@ impl Page<'_> {
             2 => Kind::IndexInterior,
             _ => return detail,
         };
+        if self.number == 1 && matches!(kind, Kind::IndexLeaf | Kind::IndexInterior) {
+            detail.diagnostics.push("invalid_page_one_kind");
+            detail.coverage = LocalCoverage::Partial;
+            return detail;
+        }
         let header_size = if kind.interior() { 12 } else { 8 };
         let count = word(self.bytes, base + 3);
         let encoded_start = word(self.bytes, base + 5);
@@ -170,10 +207,10 @@ impl Page<'_> {
         let pointer_end = base + header_size + usize::from(count) * 2;
         if pointer_end > start || start > self.usable || self.bytes[base + 7] > 60 {
             detail.diagnostics.push("invalid_btree_header");
-            detail.coverage = "partial";
+            detail.coverage = LocalCoverage::Partial;
             return detail;
         }
-        detail.kind = Some(kind.name());
+        detail.kind = Some(kind);
         detail.header = Some(BtreeHeader {
             range: self.range(base, header_size),
             first_freeblock: u32::from(word(self.bytes, base + 1)),
@@ -217,23 +254,32 @@ impl Page<'_> {
         }
         self.freeblocks(&mut detail, start, usize::from(word(self.bytes, base + 1)));
         contain_overlaps(&mut detail, start, self.usable);
+        self.records(&mut detail);
         self.fragments(&mut detail, start, self.bytes[base + 7]);
-        detail.coverage = if !detail.diagnostics.is_empty()
-            || detail.cells.iter().any(|cell| {
-                cell.diagnostic.is_some()
-                    || cell
-                        .record
-                        .as_ref()
-                        .is_some_and(|record| record.state != "complete")
-            }) {
-            "partial"
-        } else {
-            "complete"
-        };
+        detail.finish_coverage();
         detail
     }
 
     fn freeblocks(&self, detail: &mut PageDetail, start: usize, mut offset: usize) {
+        // Prefix maxima allow overlap queries without quadratic scans of cells.
+        let mut occupied: Vec<_> = detail
+            .cells
+            .iter()
+            .map(|cell| {
+                (
+                    cell.offset,
+                    cell.range
+                        .as_ref()
+                        .map_or(cell.offset + 1, |range| range.page_offset + range.length),
+                )
+            })
+            .collect();
+        occupied.sort_unstable();
+        let mut high = 0;
+        for (_, end) in &mut occupied {
+            high = high.max(*end);
+            *end = high;
+        }
         while offset != 0 {
             if offset < start || offset + 4 > self.usable {
                 detail.diagnostics.push("invalid_freeblock_extent");
@@ -251,11 +297,48 @@ impl Page<'_> {
                 range: Some(self.range(offset, size)),
                 diagnostic: None,
             });
+            let before_end =
+                occupied.partition_point(|(start, _)| (*start as usize) < offset + size);
+            if before_end > 0 && occupied[before_end - 1].1 as usize > offset {
+                // The link is inside a disputed allocation; it cannot authorize a successor.
+                break;
+            }
+            if detail.freeblocks.len() == 1
+                && !detail.cells.iter().any(|cell| {
+                    cell.range
+                        .as_ref()
+                        .is_some_and(|range| (range.page_offset as usize) < offset)
+                })
+            {
+                detail.diagnostics.push("freeblock_without_preceding_cell");
+                detail.freeblocks[0].range = None;
+                detail.freeblocks[0].diagnostic = Some("freeblock_without_preceding_cell");
+                break;
+            }
             if next != 0 && next < offset + size {
                 detail.diagnostics.push("invalid_freeblock_link");
                 break;
             }
             offset = next;
+        }
+    }
+
+    fn records(&self, detail: &mut PageDetail) {
+        // Record headers are interpreted only after allocations are disjoint.
+        // This also bounds total local record work to the usable page size.
+        for cell in &mut detail.cells {
+            if let (Some(local), Some(payload)) = (&cell.local_payload, cell.payload_size) {
+                let start = local.page_offset as usize;
+                let record = record(
+                    &self.bytes[start..start + local.length as usize],
+                    payload,
+                    self.schema_format,
+                );
+                if record.state == RecordState::Invalid {
+                    cell.diagnostic = Some("invalid_record");
+                }
+                cell.record = Some(record);
+            }
         }
     }
 
@@ -364,14 +447,6 @@ impl Page<'_> {
         cell.payload_size = Some(payload);
         cell.local_payload = Some(self.range(cursor, local));
         cell.overflow_page = spill.then(|| dword(self.bytes, cursor + local));
-        cell.record = Some(record(&self.bytes[cursor..cursor + local], payload));
-        if cell
-            .record
-            .as_ref()
-            .is_some_and(|record| record.state == "invalid")
-        {
-            return Err("invalid_record");
-        }
         Ok(())
     }
 }
@@ -472,13 +547,17 @@ fn varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, &'static str> {
     unreachable!()
 }
 
-fn record(bytes: &[u8], payload: u64) -> RecordDetail {
+fn record(bytes: &[u8], payload: u64, schema_format: u32) -> RecordDetail {
     let mut detail = RecordDetail {
-        state: "invalid",
+        state: RecordState::Invalid,
         header_size: None,
         serial_types: vec![],
     };
     let mut cursor = 0;
+    if !(1..=4).contains(&schema_format) {
+        detail.state = RecordState::UnsupportedFormat;
+        return detail;
+    }
     let Ok(header) = varint(bytes, &mut cursor) else {
         return detail;
     };
@@ -494,11 +573,12 @@ fn record(bytes: &[u8], payload: u64) -> RecordDetail {
     while cursor < available {
         let Ok(serial) = varint(&bytes[..available], &mut cursor) else {
             if end > available {
-                detail.state = "needs_overflow";
+                detail.state = RecordState::NeedsOverflow;
             }
             return detail;
         };
         let size = match serial {
+            8 | 9 if schema_format < 4 => return detail,
             0 | 8 | 9 => 0,
             1..=4 => serial,
             5 => 6,
@@ -516,9 +596,9 @@ fn record(bytes: &[u8], payload: u64) -> RecordDetail {
         detail.serial_types.push(serial.to_string());
     }
     if end > available {
-        detail.state = "needs_overflow";
+        detail.state = RecordState::NeedsOverflow;
     } else if header.checked_add(body) == Some(payload) {
-        detail.state = "complete";
+        detail.state = RecordState::Complete;
     }
     detail
 }
@@ -534,7 +614,7 @@ pub(super) fn read_page(file: &File, number: u32, geometry: &DatabaseGeometry) -
             cells: vec![],
             freeblocks: vec![],
             diagnostics: vec!["page_read_failed"],
-            coverage: "partial",
+            coverage: LocalCoverage::Partial,
         };
     }
     Page {
@@ -542,6 +622,7 @@ pub(super) fn read_page(file: &File, number: u32, geometry: &DatabaseGeometry) -
         number,
         size: geometry.page_size,
         usable: geometry.usable_size as usize,
+        schema_format: geometry.schema_format,
     }
     .inspect()
 }
