@@ -6,6 +6,7 @@ import { App, type InspectionGraph, type SessionStatus } from "./App";
 
 const graph: InspectionGraph = {
   revision: 1,
+  pointerMap: { diagnostics: [], applicable: false, complete: true, largestRoot: { value: 0, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 52, fileOffset: 52, length: 4 }, validationRule: "sqlite_header_largest_root" } }, incrementalVacuum: { value: 0, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 64, fileOffset: 64, length: 4 }, validationRule: "sqlite_header_incremental_vacuum" } }, locations: [], layout: null, lockBytePage: null, pages: [] },
   freelist: { firstTrunk: { value: 0, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 32, fileOffset: 32, length: 4 }, validationRule: "sqlite_header_first_freelist_trunk" } }, declaredCount: null, trunks: [], coverage: { reason: "complete", stoppingClaim: null, evaluatedPages: 0, remainder: 0 } },
   coverage: { scope: "page_inventory", evaluated: 3, total: 3, nextPage: null, reason: "complete", remainder: 0 },
   snapshot: {
@@ -19,7 +20,7 @@ const graph: InspectionGraph = {
       textEncoding: "utf8",
     },
   },
-  pages: [1, 2, 3].map(number => ({ number, detail: {
+  pages: [1, 2, 3].map(number => ({ number, classification: { role: "table_leaf", reconciled: true, referenced: true, claims: [] }, detail: {
     allocationRole: null, kind: "table_leaf", coverage: "complete", diagnostics: [], freeblocks: [],
     header: { range: { pageOffset: 0, fileOffset: (number - 1) * 4096, length: 8 }, firstFreeblock: 0, cellCount: 1, contentStart: 4076, fragmentedBytes: 0, rightmostChild: null },
     regions: [{ kind: "cell_content", range: { pageOffset: 4076, fileOffset: (number - 1) * 4096 + 4076, length: 4 } }],
@@ -112,6 +113,7 @@ describe("page atlas", () => {
     allocation.relationships = allocation.relationshipClaims.map(claim => ({ claimId: claim.id, kind: claim.kind, source: claim.source, target: claim.target! }));
     allocation.traversals = [{ kind: "freelist", origin: { type: "page", pageNumber: 1 }, validatedPrefix: [{ pageNumber: 2 }], stop: null }];
     for (const page of allocation.pages.slice(1)) {
+      page.classification.role = page.number === 2 ? "freelist_trunk" : "freelist_leaf";
       Object.assign(page.detail, { kind: null, allocationRole: page.number === 2 ? "freelist_trunk" : "freelist_leaf", cells: [], header: null });
     }
     vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: () => Promise.resolve(url.endsWith("/revisions/1") ? allocation : published) })));
@@ -252,4 +254,70 @@ describe("page atlas", () => {
     expect(container.querySelectorAll("[data-page-number]")).toHaveLength(0);
     expect(screen.queryByText("Page atlas unavailable")).toBeNull();
   });
+});
+
+it("explains every supported role and finding cue in the atlas legend", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  respond(() => published);
+  render(<App />);
+  const legend = await screen.findByRole("region", { name: "Role and finding legend" });
+  for (const label of ["table leaf", "table interior", "index leaf", "index interior", "B-tree (subtype unknown)", "freelist trunk", "freelist leaf", "Freelist (subtype unknown)", "overflow", "pointer map", "lock byte", "Unknown / opaque", "conflicting", "Unreferenced", "Warning", "Error", "Partial", "Not reconciled"]) {
+    expect(legend.textContent).toContain(label);
+  }
+  cleanup(); vi.unstubAllGlobals();
+});
+
+it("uses reconciled roles and exposes all claims instead of prioritizing local headers", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  const classified = structuredClone(graph);
+  Object.assign(classified.pages[0], { classification: { role: "conflicting", reconciled: true, referenced: true, claims: [
+    { role: "table_leaf", source: "local_structure", state: "validated", evidence: graph.relationshipClaims[0].evidence, relationshipId: null },
+    { role: "overflow", source: "relationship", state: "conflicting", evidence: graph.relationshipClaims[1].evidence, relationshipId: "overflow:cell:2:0" },
+  ] } });
+  Object.assign(classified.pages[1], { classification: { role: "unknown", reconciled: true, referenced: false, claims: [] } });
+  vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: () => Promise.resolve(url.endsWith("/revisions/1") ? classified : published) })));
+  const { container } = render(<App />);
+  await screen.findByRole("heading", { name: "Page atlas" });
+  expect(container.querySelector('[data-page-number="1"]')?.getAttribute("data-role")).toBe("conflicting");
+  expect(container.querySelector('[data-page-number="2"]')?.getAttribute("data-role")).toBe("unknown");
+  expect(container.querySelector('[data-page-number="2"]')?.textContent).toContain("Unreferenced");
+  expect(screen.getByRole("table", { name: "Page role claims" }).textContent).toContain("local structure");
+  expect(screen.getByRole("table", { name: "Page role claims" }).textContent).toContain("overflow");
+  cleanup(); vi.unstubAllGlobals();
+});
+
+it("navigates pointer-map targets and parents while retaining malformed entry evidence", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  const mapped = structuredClone(graph);
+  Object.assign(mapped, { pointerMap: {
+    applicable: true, diagnostics: [], complete: false, largestRoot: { value: 1, evidence: graph.relationshipClaims[0].evidence },
+    incrementalVacuum: { value: 0, evidence: graph.relationshipClaims[0].evidence }, locations: [{ pageNumber: 2 }], layout: null, lockBytePage: null,
+    pages: [{ page: { pageNumber: 2 }, complete: false, diagnostics: ["pointer_map_truncated"], entries: [
+      { target: { type: "page", pageNumber: 3 }, kind: "btree_child", rawKind: 5, parent: { type: "page", pageNumber: 1 }, parentValue: 1, evidence: { page: { pageNumber: 2 }, range: { pageOffset: 0, fileOffset: 4096, length: 5 }, validationRule: "sqlite_pointer_map_entry" }, state: "validated", diagnostics: [] },
+      { target: { type: "page", pageNumber: 999 }, kind: null, rawKind: 99, parent: null, parentValue: null, evidence: { page: { pageNumber: 2 }, range: { pageOffset: 5, fileOffset: 4101, length: 1 }, validationRule: "sqlite_pointer_map_entry" }, state: "invalid", diagnostics: ["pointer_map_invalid_kind"] },
+    ] }],
+  } });
+  vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: () => Promise.resolve(url.endsWith("/revisions/1") ? mapped : published) })));
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Inspect pointer map page 2" }));
+  expect(screen.getByRole("table", { name: "Pointer-map entries" }).textContent).toContain("99");
+  expect(screen.getByRole("table", { name: "Pointer-map entries" }).textContent).toContain("4096");
+  expect(screen.queryByRole("button", { name: "Inspect mapped page 999" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Inspect mapped page 3" }));
+  expect(screen.getByRole("heading", { name: "Page 3" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Inspect pointer map page 2" }));
+  fireEvent.click(screen.getByRole("button", { name: "Inspect claimed parent page 1" }));
+  expect(screen.getByRole("heading", { name: "Page 1" })).toBeTruthy();
+  cleanup(); vi.unstubAllGlobals();
+});
+
+it("marks finding pages across the mosaic, including claim targets away from diagnostic bytes", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  respond(() => published);
+  const { container } = render(<App />);
+  await screen.findByRole("heading", { name: "Page atlas" });
+  for (const page of [1, 2, 3]) {
+    expect(container.querySelector(`[data-page-number="${page}"]`)?.getAttribute("data-finding")).toBe("error");
+  }
+  cleanup(); vi.unstubAllGlobals();
 });

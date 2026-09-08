@@ -139,6 +139,10 @@ pub enum TopologyPhase {
     OverflowRelationshipNormalization,
     FreelistInspection,
     AllocationReconciliation,
+    PointerMapInspection,
+    RoleReconciliation,
+    PointerMapValidation,
+    PointerMapReconciliation,
     Complete,
 }
 
@@ -292,6 +296,10 @@ fn decode_phase(value: u8) -> TopologyPhase {
         9 => TopologyPhase::OverflowRelationshipNormalization,
         10 => TopologyPhase::FreelistInspection,
         11 => TopologyPhase::AllocationReconciliation,
+        12 => TopologyPhase::PointerMapInspection,
+        13 => TopologyPhase::RoleReconciliation,
+        14 => TopologyPhase::PointerMapValidation,
+        15 => TopologyPhase::PointerMapReconciliation,
         _ => TopologyPhase::Complete,
     }
 }
@@ -313,7 +321,11 @@ fn next_phase(phase: TopologyPhase) -> Option<TopologyPhase> {
         TopologyPhase::OverflowRelationshipNormalization => {
             Some(TopologyPhase::AllocationReconciliation)
         }
-        TopologyPhase::AllocationReconciliation => Some(TopologyPhase::Complete),
+        TopologyPhase::AllocationReconciliation => Some(TopologyPhase::PointerMapInspection),
+        TopologyPhase::PointerMapInspection => Some(TopologyPhase::PointerMapValidation),
+        TopologyPhase::PointerMapValidation => Some(TopologyPhase::PointerMapReconciliation),
+        TopologyPhase::PointerMapReconciliation => Some(TopologyPhase::RoleReconciliation),
+        TopologyPhase::RoleReconciliation => Some(TopologyPhase::Complete),
         TopologyPhase::FreelistInspection => Some(TopologyPhase::BtreeClaimCollection),
         TopologyPhase::Complete => None,
     }
@@ -454,6 +466,8 @@ pub struct StructuralDiagnostic {
 }
 
 pub(super) struct Topology {
+    pub pointer_map: Option<super::PointerMapEvidence>,
+    pub classifications: Vec<super::PageClassification>,
     pub freelist: super::FreelistEvidence,
     pub claims: Vec<RelationshipClaim>,
     pub relationships: Vec<Relationship>,
@@ -465,6 +479,8 @@ pub(super) struct Topology {
 impl Topology {
     pub(super) fn empty(budget: TraversalBudget) -> Self {
         Self {
+            pointer_map: None,
+            classifications: vec![],
             freelist: super::FreelistEvidence::uninspected(),
             claims: Vec::new(),
             relationships: Vec::new(),
@@ -558,6 +574,7 @@ pub(super) fn inspect(
         allocation.coverage = cancelled.coverage(budget);
         return allocation;
     }
+    let original_pages = pages;
     let inventory = PageInventory {
         pages,
         overrides: &allocation.freelist.page_overrides,
@@ -623,14 +640,49 @@ pub(super) fn inspect(
     claims.append(&mut allocation.claims);
     traversals.append(&mut allocation.traversals);
     diagnostics.append(&mut allocation.diagnostics);
-    cancelled.complete();
-    Topology {
+    let mut result = Topology {
+        pointer_map: None,
+        classifications: vec![],
         freelist: allocation.freelist,
         claims,
         relationships,
         traversals,
         diagnostics,
         coverage: cancelled.coverage(budget),
+    };
+    if !cancelled.stopped() && !cancelled.aggregate_budget_exhausted() {
+        reconcile_page_roles(file, geometry, original_pages, &mut result, cancelled);
+    }
+    cancelled.complete();
+    result.coverage = cancelled.coverage(budget);
+    result
+}
+
+fn reconcile_page_roles(
+    file: &File,
+    geometry: &DatabaseGeometry,
+    pages: &[PageEntity],
+    result: &mut Topology,
+    cancelled: &WorkControl,
+) {
+    let mut maps = super::pointer_map::inspect(file, geometry, pages, cancelled);
+    let maps_complete = super::pointer_map::validate(geometry, &mut maps, cancelled)
+        && super::pointer_map::reconcile(
+            &mut maps,
+            result,
+            pages.len() == geometry.page_count as usize,
+            cancelled,
+        );
+    maps.complete &= maps_complete;
+    result.pointer_map = Some(maps);
+    if !maps_complete || !super::roles::reconcile(geometry, pages, result, cancelled) {
+        // Claims and byte evidence survive, but normalization did not finish
+        // reconciling the newly observed constraints. Withhold dependent views.
+        result.relationships.clear();
+        result.traversals.clear();
+        if let Some(maps) = &mut result.pointer_map {
+            maps.complete = false;
+        }
     }
 }
 
@@ -823,6 +875,18 @@ fn validate_btree_claim(
                     claim.stop_reason = Some(TraversalStopReason::MissingTarget);
                     return Some(diagnostic(
                         "btree_child_missing",
+                        claim,
+                        Containment::TraversalStopped,
+                    ));
+                }
+                if matches!(
+                    target_page.classification.role,
+                    super::PageRole::PointerMap | super::PageRole::LockByte
+                ) {
+                    claim.state = RelationshipState::Conflicting;
+                    claim.stop_reason = Some(TraversalStopReason::ConflictingClaim);
+                    return Some(diagnostic(
+                        "btree_reserved_page_conflict",
                         claim,
                         Containment::TraversalStopped,
                     ));
@@ -1516,7 +1580,13 @@ fn validate_overflow_target(
         );
         return;
     }
-    if page.detail.kind.is_some() || page.detail.allocation_role.is_some() {
+    if page.detail.kind.is_some()
+        || page.detail.allocation_role.is_some()
+        || matches!(
+            page.classification.role,
+            super::PageRole::PointerMap | super::PageRole::LockByte
+        )
+    {
         invalidate_overflow_claim(
             claim,
             RelationshipState::Conflicting,

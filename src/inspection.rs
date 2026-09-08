@@ -7,6 +7,12 @@ use serde::Serialize;
 use thiserror::Error;
 
 mod btree;
+mod pointer_map;
+mod roles;
+pub use pointer_map::{
+    PointerMapEntry, PointerMapEvidence, PointerMapKind, PointerMapLayout, PointerMapPage,
+};
+pub use roles::{PageClassification, PageRole, RoleClaim};
 mod freelist;
 pub use freelist::{
     AllocationRole, FreelistCoverage, FreelistCoverageReason, FreelistEvidence, FreelistField,
@@ -83,6 +89,10 @@ pub struct DatabaseGeometry {
     pub page_count: u32,
     pub text_encoding: TextEncoding,
     pub schema_format: u32,
+    pub largest_root_page: u32,
+    pub incremental_vacuum: u32,
+    pub file_length: u64,
+    pub declared_page_count: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -104,6 +114,7 @@ pub struct DatabaseSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct PageEntity {
     pub number: u32,
+    pub classification: PageClassification,
     pub detail: PageDetail,
 }
 
@@ -120,6 +131,7 @@ pub struct InspectionGraph {
     pub diagnostics: Vec<StructuralDiagnostic>,
     pub topology_coverage: TopologyCoverage,
     pub freelist: FreelistEvidence,
+    pub pointer_map: PointerMapEvidence,
 }
 
 fn read_snapshot(
@@ -142,7 +154,7 @@ fn read_snapshot(
         .filter(|size| *size >= MINIMUM_USABLE_SIZE)
         .ok_or(InspectionError::InvalidReservedBytes(reserved_bytes))?;
     let text_encoding = decode_text_encoding(&header)?;
-    let page_count = decode_page_count(&header, file_length, page_size)?;
+    let page_count = decode_page_count(&header, file_length, page_size, usable_size)?;
 
     let snapshot = DatabaseSnapshot {
         id: snapshot_id.to_owned(),
@@ -154,6 +166,10 @@ fn read_snapshot(
             page_count,
             text_encoding,
             schema_format: decode_u32(&header, 44),
+            largest_root_page: decode_u32(&header, 52),
+            incremental_vacuum: decode_u32(&header, 64),
+            file_length,
+            declared_page_count: decode_u32(&header, 28),
         },
     };
 
@@ -202,16 +218,25 @@ fn decode_page_count(
     header: &[u8; SQLITE_HEADER_SIZE],
     file_length: u64,
     page_size: u32,
+    usable_size: u32,
 ) -> Result<u32, InspectionError> {
+    let page_bytes = page_size;
     let page_size = u64::from(page_size);
     if file_length < page_size {
         return Err(InspectionError::MissingFirstPage);
     }
-    if !file_length.is_multiple_of(page_size) {
+    let page_count = file_length.div_ceil(page_size);
+    // A trailing pointer map has a geometry-defined identity even when its
+    // bytes are incomplete. Other incomplete-page handling remains unchanged.
+    let partial_map = !file_length.is_multiple_of(page_size)
+        && decode_u32(header, 52) != 0
+        && u32::try_from(page_count).ok().is_some_and(|number| {
+            roles::map_number(page_bytes, usable_size, number) == Some(number)
+        });
+    if !file_length.is_multiple_of(page_size) && !partial_map {
         return Err(InspectionError::IncompletePage);
     }
 
-    let page_count = file_length / page_size;
     if page_count > MAXIMUM_PAGE_NUMBER {
         return Err(InspectionError::TooManyPages);
     }
@@ -219,7 +244,8 @@ fn decode_page_count(
     let declared = decode_u32(header, 28);
     let change_counter = decode_u32(header, 24);
     let version_valid_for = decode_u32(header, 92);
-    if declared != 0 && change_counter == version_valid_for && declared != physical {
+    if declared != 0 && change_counter == version_valid_for && declared != physical && !partial_map
+    {
         return Err(InspectionError::PageCountMismatch { declared, physical });
     }
     Ok(physical)

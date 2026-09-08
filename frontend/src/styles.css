@@ -89,3 +89,30 @@ h2 { font-size: 20px; }
 .page[data-role="conflicting"] { border-color: #a74a34; background: #f8dfd7; }
 .byte-segment.freelist_header { background: #698361; }
 .byte-segment.freelist_leaf_pointers { background: #99b091; }
+
+.role-legend { margin: 0 0 20px; font-size: 12px; color: #c7ced6; }
+.role-legend ul { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; padding: 0; }
+.role-legend li { padding: 5px 8px; border-left: 4px solid var(--role-color); background: #181c22; }
+.role-legend p { line-height: 1.6; color: #9da8b4; }
+[data-role="table_leaf"] { --role-color: #70d5c1; }
+[data-role="table_interior"] { --role-color: #2a9d88; }
+[data-role="index_leaf"] { --role-color: #bda7f5; }
+[data-role="index_interior"] { --role-color: #8563d0; }
+[data-role="btree"] { --role-color: #579cba; }
+[data-role="freelist"] { --role-color: #a4ad78; }
+[data-role="freelist_trunk"] { --role-color: #8aa86c; }
+[data-role="freelist_leaf"] { --role-color: #c0d99f; }
+[data-role="overflow"] { --role-color: #5faade; }
+[data-role="pointer_map"] { --role-color: #e4ad53; }
+[data-role="lock_byte"] { --role-color: #d88dba; }
+[data-role="unknown"] { --role-color: #85909b; }
+[data-role="conflicting"] { --role-color: #fa806c; }
+.page[data-role] { border-left: 4px solid var(--role-color); background: #181c22; color: #e9edf4; }
+.page[data-role="unknown"] { border-left-style: dashed; }
+.page[data-role="conflicting"] { background: repeating-linear-gradient(135deg, #342323, #342323 8px, #251c22 8px, #251c22 16px); }
+.page[data-finding="error"] { border-top: 3px solid #fa806c; }
+.page[data-finding="warning"] { border-top: 3px solid #e4ad53; }
+.page.selected { outline: 2px solid #70d5c1; outline-offset: 2px; }
+.page span { opacity: 1; }
+.map-links { display: flex; flex-wrap: wrap; gap: 6px; }
+.freelist-panel { background: #17221d; color: #d8e5d8; border-color: #53735c; }

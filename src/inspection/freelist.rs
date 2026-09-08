@@ -401,6 +401,15 @@ impl Inspector<'_> {
             self.result.claims[index].state = RelationshipState::Unresolved;
             return false;
         }
+        if super::roles::reserved_role(self.geometry, target).is_some() {
+            self.fail(
+                index,
+                "freelist_reserved_page_conflict",
+                TraversalStopReason::ConflictingClaim,
+            );
+            self.result.claims[index].state = RelationshipState::Conflicting;
+            return false;
+        }
         if let Some(previous) = self.incoming.get(&target).copied() {
             self.repeated_claim(index, role, target, previous);
             return false;
@@ -425,6 +434,7 @@ impl Inspector<'_> {
             target,
             PageEntity {
                 number: target,
+                classification: page.classification.clone(),
                 detail: super::PageDetail {
                     allocation_role: Some(role),
                     kind: None,

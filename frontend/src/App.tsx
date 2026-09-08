@@ -1,17 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  PageDetail, roleLabel, type PageEvidence, type PhysicalEvidence, type Relationship,
+  PageDetail, type PageEvidence, type PhysicalEvidence, type Relationship,
   type RelationshipClaim, type StructuralDiagnostic,
 } from "./PageDetail";
 
+import { RoleLegend, RoleClaims, roleLabels, type Classification } from "./PageRoles";
+import { PointerMap, type PointerMapEvidence } from "./PointerMap";
 import { Freelist, type FreelistEvidence } from "./Freelist";
 
 type TextEncoding = "utf8" | "utf16_le" | "utf16_be";
-type TopologyPhase = "allocation_reconciliation" | "freelist_inspection" | "btree_claim_collection" | "btree_claim_validation" | "btree_parent_reconciliation" | "btree_cycle_reconciliation" | "btree_relationship_normalization" | "btree_traversal" | "overflow_inspection" | "overflow_reconciliation" | "overflow_relationship_normalization" | "complete";
+type TopologyPhase = "pointer_map_validation" | "pointer_map_reconciliation" | "pointer_map_inspection" | "role_reconciliation" | "allocation_reconciliation" | "freelist_inspection" | "btree_claim_collection" | "btree_claim_validation" | "btree_parent_reconciliation" | "btree_cycle_reconciliation" | "btree_relationship_normalization" | "btree_traversal" | "overflow_inspection" | "overflow_reconciliation" | "overflow_relationship_normalization" | "complete";
 
 export interface InspectionGraph {
   revision: number;
   freelist: FreelistEvidence;
+  pointerMap: PointerMapEvidence;
   coverage: Coverage;
   snapshot: {
     id: string;
@@ -24,7 +27,7 @@ export interface InspectionGraph {
       textEncoding: TextEncoding;
     };
   };
-  pages: Array<{ number: number; detail: PageEvidence }>;
+  pages: Array<{ number: number; classification: Classification; detail: PageEvidence }>;
   relationshipClaims: RelationshipClaim[];
   relationships: Relationship[];
   traversals: Array<{
@@ -99,14 +102,33 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
         else claimsByPage.set(page, [claim]);
       }
     }
+    const findingsByPage = new Map<number, "warning" | "error">();
+    const mark = (page: number, severity: "warning" | "error") => {
+      if (findingsByPage.get(page) !== "error") findingsByPage.set(page, severity);
+    };
+    const claimsById = new Map(graph.relationshipClaims.map(claim => [claim.id, claim]));
+    for (const diagnostic of graph.diagnostics) {
+      for (const evidence of diagnostic.evidence) mark(evidence.page.pageNumber, diagnostic.severity);
+      for (const id of diagnostic.affectedRelationships) {
+        const claim = claimsById.get(id);
+        if (claim) {
+          mark(claim.source.pageNumber, diagnostic.severity);
+          if (claim.target) mark(claim.target.pageNumber, diagnostic.severity);
+        }
+      }
+    }
+    for (const page of graph.pages) {
+      if (page.classification.role === "conflicting" || page.detail.diagnostics.length || page.detail.cells.some(cell => cell.diagnostic) || page.detail.freeblocks.some(block => block.diagnostic)) mark(page.number, "error");
+    }
     return {
+      findingsByPage,
       pagesByNumber,
       claimsByPage,
       relationshipsByClaim: new Map(
         graph.relationships.map(relationship => [relationship.claimId, relationship]),
       ),
     };
-  }, [graph.pages, graph.relationshipClaims, graph.relationships]);
+  }, [graph.pages, graph.relationshipClaims, graph.relationships, graph.diagnostics]);
   const active = projection.pagesByNumber.get(selectedPage);
   const freelistTraversal = graph.traversals.find(traversal => traversal.kind === "freelist");
   const firstFreelistLink = graph.relationships.find(relationship =>
@@ -154,6 +176,7 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
 
       <Freelist evidence={graph.freelist} prefix={freelistTraversal?.validatedPrefix ?? []}
         firstNavigable={firstFreelistLink?.target.pageNumber ?? null} onSelectPage={selectPage} />
+      <PointerMap evidence={graph.pointerMap} selectedPage={selectedPage} availablePages={projection.pagesByNumber} onSelectPage={selectPage} />
       <div className="content-grid">
         <section className="atlas-panel">
           <div className="section-heading">
@@ -163,12 +186,14 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
             </div>
             <p>{graph.pages.length.toLocaleString()} inspected pages</p>
           </div>
+          <RoleLegend />
           <div className="mosaic">
             {graph.pages.map((page) => (
               <button
                 className={page.number === selectedPage ? "page selected" : "page"}
                 data-page-number={page.number}
-                data-role={page.detail.allocationRole ?? page.detail.kind ?? "unknown"}
+                data-role={page.classification.role}
+                data-finding={projection.findingsByPage.get(page.number) ?? "none"}
                 aria-pressed={page.number === selectedPage}
                 key={page.number}
                 onClick={() => selectPage(page.number)}
@@ -176,8 +201,11 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
               >
                 <span>Page</span>
                 <strong>{page.number}</strong>
-                <span>{roleLabel(page.detail.allocationRole ?? page.detail.kind)}</span>
+                <span>{roleLabels[page.classification.role]}</span>
                 {page.detail.coverage === "partial" && <span>Partial</span>}
+                {projection.findingsByPage.has(page.number) && <span>{projection.findingsByPage.get(page.number) === "error" ? "Error" : "Warning"}</span>}
+                {!page.classification.referenced && <span>Unreferenced</span>}
+                {!page.classification.reconciled && <span>Not reconciled</span>}
               </button>
             ))}
           </div>
@@ -190,11 +218,11 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
           <dl>
             <div><dt>Identity</dt><dd>page:{selectedPage}</dd></div>
             <div><dt>Byte range</dt><dd>{((selectedPage - 1) * geometry.pageSize).toLocaleString()}–{(selectedPage * geometry.pageSize - 1).toLocaleString()}</dd></div>
-            <div><dt>Role claim</dt><dd>{active ? roleLabel(active.detail.allocationRole ?? active.detail.kind) : "Unknown"}</dd></div>
+            <div><dt>Role claim</dt><dd>{active ? roleLabels[active.classification.role] : "Unknown"}</dd></div>
           </dl>
           </>}
           <p className="evidence-note">
-            Select a page to inspect its structural map and physical cell inventory below. Freelist roles come from allocation evidence. Other global role attribution is not yet evaluated.
+            Select a page to inspect its structural map and physical cell inventory below. Page roles reconcile physical evidence. Unknown pages retain opaque bytes; conflicts retain competing claims.
           </p>
         </aside>
       </div>
@@ -224,6 +252,9 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
         <p>Capacity: {activeTrunk.capacity} · Backward-compatible writer capacity: {activeTrunk.compatibilityCapacity}</p>
         <p>Leaf-count evidence: page bytes [4, 8), main-file bytes [{activeTrunk.leafCount.evidence.range.fileOffset}, {activeTrunk.leafCount.evidence.range.fileOffset + 4}).</p>
       </section>}
+      {active && <RoleClaims classification={active.classification} onEvidence={evidence => {
+        setSelectedPage(evidence.page.pageNumber); setEvidenceLocus(evidence);
+      }} />}
       {active && <PageDetail
         detail={active.detail}
         pageSize={geometry.pageSize}

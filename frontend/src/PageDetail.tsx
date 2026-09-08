@@ -85,7 +85,7 @@ export function PageDetail({
   ];
   return <section className="page-detail" aria-label="Page structural detail">
     <div className="section-heading"><h2>Structural evidence</h2><span>Local B-tree coverage: {detail.coverage}</span></div>
-    <p className="evidence-note">Role is a locally validated header claim. B-tree and overflow topology is evaluated separately below; global role reconciliation is later work. Application values and raw payload bytes are not disclosed.</p>
+    <p className="evidence-note">Local structural observations and relationship claims are preserved alongside the reconciled page role. Application values and raw payload bytes are not disclosed.</p>
     {evidenceByte !== null && <p className="evidence-locus" role="status">Diagnostic evidence locus: page {pageNumber}, byte {evidenceByte}</p>}
     {detail.diagnostics.length > 0 && <ul className="diagnostics">{detail.diagnostics.map((code, index) => <li key={index}>{code.replaceAll("_", " ")}</li>)}</ul>}
     {header && <dl className="header-fields">

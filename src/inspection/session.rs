@@ -97,6 +97,7 @@ pub struct ObservedEvidence {
     pub diagnostics: Vec<super::StructuralDiagnostic>,
     pub topology_coverage: super::TopologyCoverage,
     pub freelist: super::FreelistEvidence,
+    pub pointer_map: super::PointerMapEvidence,
 }
 
 /// Metadata excludes access time, so inspection reads cannot invalidate themselves.
@@ -376,6 +377,9 @@ impl SessionData {
             for (number, page) in std::mem::take(&mut topology.freelist.page_overrides) {
                 pages[(number - 1) as usize] = page;
             }
+            for (page, classification) in pages.iter_mut().zip(topology.classifications) {
+                page.classification = classification;
+            }
             self.published = Some(Arc::new(InspectionGraph {
                 revision: 1,
                 coverage: coverage.clone(),
@@ -387,6 +391,9 @@ impl SessionData {
                 diagnostics: topology.diagnostics,
                 topology_coverage: topology.coverage,
                 freelist: topology.freelist,
+                pointer_map: topology
+                    .pointer_map
+                    .unwrap_or_else(|| super::PointerMapEvidence::header(&snapshot.geometry)),
             }));
             self.status.revision = Some(1);
         }
@@ -665,8 +672,14 @@ impl InspectionSession {
                 .as_ref()
                 .ok_or(InspectionError::NotScanning)?
                 .geometry;
-            let detail = super::btree::read_page(&d.inputs.file, number, geometry);
-            Arc::make_mut(&mut d.pages).push(PageEntity { number, detail });
+            let detail = super::roles::reserved_detail(geometry, number)
+                .unwrap_or_else(|| super::btree::read_page(&d.inputs.file, number, geometry));
+            let classification = super::roles::initial(geometry, number, &detail);
+            Arc::make_mut(&mut d.pages).push(PageEntity {
+                number,
+                classification,
+                detail,
+            });
             d.status.progress.completed = number;
             if !d.validate() {
                 return Err(InspectionError::Invalidated);
@@ -817,6 +830,14 @@ impl InspectionSession {
         let published = d.published.as_deref();
         let observed = d.observed_topology.as_ref();
         Some(ObservedEvidence {
+            pointer_map: published.map_or_else(
+                || {
+                    observed
+                        .and_then(|t| t.pointer_map.clone())
+                        .unwrap_or_else(|| super::PointerMapEvidence::header(&snapshot.geometry))
+                },
+                |revision| revision.pointer_map.clone(),
+            ),
             freelist: published.map_or_else(
                 || {
                     observed.map_or_else(super::FreelistEvidence::uninspected, |topology| {
@@ -833,6 +854,11 @@ impl InspectionSession {
                     if let Some(topology) = observed {
                         for (number, page) in &topology.freelist.page_overrides {
                             pages[(*number - 1) as usize] = page.clone();
+                        }
+                        for (page, classification) in
+                            pages.iter_mut().zip(&topology.classifications)
+                        {
+                            page.classification = classification.clone();
                         }
                     }
                     pages
