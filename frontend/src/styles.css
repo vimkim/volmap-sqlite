@@ -116,3 +116,12 @@ h2 { font-size: 20px; }
 .page span { opacity: 1; }
 .map-links { display: flex; flex-wrap: wrap; gap: 6px; }
 .freelist-panel { background: #17221d; color: #d8e5d8; border-color: #53735c; }
+
+.sidecar-disclosure { margin: 1rem 0; padding: 1rem; border: 1px solid #9a7837; border-radius: .5rem; background: #1d2429; }
+.sidecar-disclosure h2 { margin-top: 0; }
+.sidecar-list { display: grid; gap: 1rem; }
+.sidecar { min-width: 0; border-top: 1px solid #59616b; }
+.sidecar h3 { overflow-wrap: anywhere; }
+.sidecar table { width: 100%; margin-top: .75rem; border-collapse: collapse; text-align: left; }
+.sidecar th, .sidecar td { padding: .35rem; border-bottom: 1px solid #59616b; }
+.sidecar-frames { overflow-x: auto; }

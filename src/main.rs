@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::net::TcpListener;
-use volmap_sqlite::inspection::{InspectionSession, ScanControl, TraversalBudget};
+use volmap_sqlite::inspection::{InspectionSession, ScanControl, SidecarBudget, TraversalBudget};
 use volmap_sqlite::web::atlas_router;
 
 #[derive(Debug, Parser)]
@@ -31,18 +31,25 @@ struct Arguments {
     /// Maximum aggregate page identities allocated across all traversal prefixes (minimum 1).
     #[arg(long, default_value_t = 1_000_000, value_parser = clap::value_parser!(u64).range(1..))]
     max_total_traversal_pages: u64,
+
+    /// Maximum WAL frames retained as sidecar evidence (0 inspects only the header).
+    #[arg(long, default_value_t = 100_000)]
+    max_wal_frames: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let arguments = Arguments::parse();
-    let session = Arc::new(InspectionSession::begin_with_traversal_budget(
+    let session = Arc::new(InspectionSession::begin_with_budgets(
         &arguments.database,
         TraversalBudget::with_total_pages(
             arguments.max_btree_pages,
             arguments.max_overflow_pages,
             arguments.max_total_traversal_pages,
         ),
+        SidecarBudget {
+            max_wal_frames: arguments.max_wal_frames,
+        },
     )?);
     let display_name = session.status().source.display_name;
 

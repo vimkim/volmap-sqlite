@@ -6,12 +6,14 @@ import {
 
 import { RoleLegend, RoleClaims, roleLabels, type Classification } from "./PageRoles";
 import { PointerMap, type PointerMapEvidence } from "./PointerMap";
+import { Sidecars, type SidecarEvidence } from "./Sidecars";
 import { Freelist, type FreelistEvidence } from "./Freelist";
 
 type TextEncoding = "utf8" | "utf16_le" | "utf16_be";
 type TopologyPhase = "pointer_map_validation" | "pointer_map_reconciliation" | "pointer_map_inspection" | "role_reconciliation" | "allocation_reconciliation" | "freelist_inspection" | "btree_claim_collection" | "btree_claim_validation" | "btree_parent_reconciliation" | "btree_cycle_reconciliation" | "btree_relationship_normalization" | "btree_traversal" | "overflow_inspection" | "overflow_reconciliation" | "overflow_relationship_normalization" | "complete";
 
 export interface InspectionGraph {
+  sidecars: SidecarEvidence[];
   revision: number;
   freelist: FreelistEvidence;
   pointerMap: PointerMapEvidence;
@@ -66,7 +68,7 @@ export interface SessionStatus {
   snapshotId: string;
   source: { id: string; displayName: string };
   state: "scanning" | "published" | "cancelled" | "stopped" | "invalidated" | "fatal";
-  progress: { unit: "pages"; completed: number; total: number | null; verifying: boolean; buildingTopology: boolean };
+  progress: { unit: "pages"; completed: number; total: number | null; verifying: boolean; buildingTopology: boolean; buildingSidecars: boolean };
   revision: number | null;
   coverage: Coverage | null;
   diagnostic: { code: string; message: string; affectedInputs: string[] } | null;
@@ -153,6 +155,7 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
       </header>
 
       <InspectionNotice status={status} />
+      <Sidecars evidence={graph.sidecars} />
 
       <section className="geometry" aria-label="Snapshot geometry">
         <GeometryFact label="Pages" value={geometry.pageCount.toLocaleString()} />
@@ -213,6 +216,7 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
 
         <aside className="evidence-panel">
           <p className="eyebrow">Selection-linked evidence</p>
+          <p>Selected evidence belongs to the physical main-file image. Sidecar changes are not applied.</p>
           <h2>{graph.pages.length ? `Page ${selectedPage}` : "No pages inspected"}</h2>
           {graph.pages.length > 0 && <>
           <dl>
@@ -284,7 +288,8 @@ function InspectionNotice({ status }: { status: SessionStatus }) {
     {status.state === "scanning" && <p>
       Page inventory: {progress.completed} / {progress.total ?? "unknown"} pages
       {progress.verifying && ". Verifying frozen inputs before publication."}
-      {progress.buildingTopology && ". Building bounded relationship topology."}
+      {progress.buildingSidecars && ". Inspecting sidecar evidence."}
+      {progress.buildingTopology && !progress.buildingSidecars && ". Building bounded relationship topology."}
     </p>}
     {coverage && <p>
       {coverage.reason === "complete" ? "Page inventory complete" : "Partial coverage"}: {coverage.evaluated} pages evaluated.

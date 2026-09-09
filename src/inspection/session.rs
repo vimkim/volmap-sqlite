@@ -62,6 +62,7 @@ pub struct Progress {
     pub total: Option<u32>,
     pub verifying: bool,
     pub building_topology: bool,
+    pub building_sidecars: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -88,6 +89,7 @@ pub struct Diagnostic {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservedEvidence {
+    pub sidecars: Vec<super::SidecarEvidence>,
     pub snapshot: DatabaseSnapshot,
     pub pages: Vec<PageEntity>,
     pub coverage: Coverage,
@@ -156,10 +158,22 @@ struct AcceptedInput {
     kind: &'static str,
     path: PathBuf,
     stamp: Option<InputStamp>,
-    digest: Option<[u8; 32]>,
+    digest: Result<Option<[u8; 32]>, io::ErrorKind>,
 }
 
 impl AcceptedInput {
+    fn sidecar_evidence(&self) -> super::SidecarEvidence {
+        let mut evidence = super::SidecarEvidence::discovered(
+            self.kind,
+            &self.path,
+            self.length(),
+            self.stamp.is_some(),
+        );
+        if self.digest.is_err() {
+            evidence.unreadable();
+        }
+        evidence
+    }
     fn length(&self) -> u64 {
         self.stamp
             .as_ref()
@@ -233,7 +247,7 @@ impl Inputs {
                     stamp: stamp(&path)?,
                     kind,
                     path,
-                    digest: None,
+                    digest: Ok(None),
                 })
             })
             .collect::<io::Result<Vec<_>>>()
@@ -247,8 +261,12 @@ impl Inputs {
         let file = File::open(path).map_err(InspectionError::Open)?;
         let descriptor = file.metadata().map_err(InspectionError::Open)?.into();
         for input in &mut accepted {
-            input.digest = digest(&input.path, input.length(), &AtomicBool::new(false))
-                .map_err(InspectionError::Open)?;
+            let result = digest(&input.path, input.length(), &AtomicBool::new(false));
+            if input.kind == "main" {
+                input.digest = Ok(result.map_err(InspectionError::Open)?);
+            } else {
+                input.digest = result.map_err(|error| error.kind());
+            }
         }
         let inputs = Self {
             accepted,
@@ -295,7 +313,7 @@ impl Inputs {
                 {
                     return Err(InspectionError::NotScanning);
                 }
-                if !result.is_ok_and(|current| current == input.digest)
+                if result.map_err(|error| error.kind()) != input.digest
                     && !changes.contains(&input.kind)
                 {
                     changes.push(input.kind);
@@ -319,10 +337,12 @@ struct SessionData {
     pages: Arc<Vec<PageEntity>>,
     published: Option<Arc<InspectionGraph>>,
     traversal_budget: super::TraversalBudget,
+    sidecar_budget: super::SidecarBudget,
     topology_active: bool,
     topology_cancellation: Arc<super::topology::WorkControl>,
     pending_topology_stop: Option<(SessionState, CoverageReason)>,
     observed_topology: Option<super::topology::Topology>,
+    sidecars: Vec<super::SidecarEvidence>,
 }
 
 impl SessionData {
@@ -381,6 +401,7 @@ impl SessionData {
                 page.classification = classification;
             }
             self.published = Some(Arc::new(InspectionGraph {
+                sidecars: self.sidecars.clone(),
                 revision: 1,
                 coverage: coverage.clone(),
                 snapshot: snapshot.clone(),
@@ -440,11 +461,29 @@ impl InspectionSession {
         path: &Path,
         traversal_budget: super::TraversalBudget,
     ) -> Result<Self, InspectionError> {
+        Self::begin_with_budgets(path, traversal_budget, super::SidecarBudget::default())
+    }
+
+    /// Accepts frozen inputs with explicit traversal and sidecar evidence ceilings.
+    /// # Errors
+    /// Returns input-access or invalidation errors during acceptance.
+    pub fn begin_with_budgets(
+        path: &Path,
+        traversal_budget: super::TraversalBudget,
+        sidecar_budget: super::SidecarBudget,
+    ) -> Result<Self, InspectionError> {
+        let inputs = Arc::new(Inputs::accept(path)?);
+        let sidecars = inputs
+            .accepted
+            .iter()
+            .skip(1)
+            .map(AcceptedInput::sidecar_evidence)
+            .collect();
         Ok(Self {
             active_checks: AtomicUsize::new(0),
             cancel_verification: AtomicBool::new(false),
             data: Mutex::new(SessionData {
-                inputs: Arc::new(Inputs::accept(path)?),
+                inputs,
                 status: SessionStatus {
                     snapshot_id: Uuid::new_v4().to_string(),
                     source: SourceIdentity {
@@ -458,6 +497,7 @@ impl InspectionSession {
                         total: None,
                         verifying: false,
                         building_topology: false,
+                        building_sidecars: false,
                     },
                     revision: None,
                     coverage: None,
@@ -467,10 +507,12 @@ impl InspectionSession {
                 pages: Arc::new(Vec::new()),
                 published: None,
                 traversal_budget,
+                sidecar_budget,
                 topology_active: false,
                 topology_cancellation: Arc::new(super::topology::WorkControl::new()),
                 pending_topology_stop: None,
                 observed_topology: None,
+                sidecars,
             }),
         })
     }
@@ -530,9 +572,9 @@ impl InspectionSession {
         &self,
         state: SessionState,
         reason: CoverageReason,
-        checkpoint: impl FnOnce(),
+        mut checkpoint: impl FnMut(),
     ) -> Result<(), InspectionError> {
-        self.verify(checkpoint)?;
+        self.verify(&mut checkpoint)?;
         let (inputs, snapshot, pages, budget, cancellation) = {
             let mut d = self.lock();
             if !d.validate() {
@@ -566,6 +608,36 @@ impl InspectionSession {
                 )
             },
         );
+        let sidecar_budget = {
+            let mut d = self.lock();
+            d.status.progress.building_sidecars = true;
+            d.sidecar_budget
+        };
+        let sidecars = inputs
+            .accepted
+            .iter()
+            .skip(1)
+            .map(|input| {
+                let evidence = input.sidecar_evidence();
+                if reason != CoverageReason::Complete || cancellation.traversal_reason().is_some() {
+                    evidence
+                } else {
+                    super::sidecar::inspect(
+                        &input.path,
+                        evidence,
+                        snapshot.as_ref().map_or(0, |s| s.geometry.page_size),
+                        &cancellation,
+                        &mut checkpoint,
+                        sidecar_budget,
+                    )
+                }
+            })
+            .collect();
+        {
+            let mut d = self.lock();
+            d.sidecars = sidecars;
+            d.status.progress.building_sidecars = false;
+        }
         drop(pages);
         let (publish_state, publish_reason, pending_stop) = {
             let mut d = self.lock();
@@ -830,6 +902,7 @@ impl InspectionSession {
         let published = d.published.as_deref();
         let observed = d.observed_topology.as_ref();
         Some(ObservedEvidence {
+            sidecars: d.sidecars.clone(),
             pointer_map: published.map_or_else(
                 || {
                     observed

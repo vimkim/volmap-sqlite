@@ -10,6 +10,7 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
     ok: true,
     json: () => Promise.resolve(url.endsWith("/revisions/1") ? {
       revision: 1,
+      sidecars: [],
       pointerMap: { diagnostics: [], applicable: false, complete: true, largestRoot: { value: 0 }, incrementalVacuum: { value: 0 }, locations: [], layout: null, lockBytePage: null, pages: [] },
       freelist: { firstTrunk: null, declaredCount: null, trunks: [], coverage: { reason: "not_inspected", stoppingClaim: null, evaluatedPages: 0, remainder: null } },
       coverage: { scope: "page_inventory", evaluated: 2, total: 2, nextPage: null, reason: "complete", remainder: 0 },

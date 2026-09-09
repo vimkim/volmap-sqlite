@@ -18,6 +18,11 @@ pub use freelist::{
     AllocationRole, FreelistCoverage, FreelistCoverageReason, FreelistEvidence, FreelistField,
     FreelistTrunk,
 };
+mod sidecar;
+pub use sidecar::{
+    JournalEvidence, ShmEvidence, SidecarBudget, SidecarCoverage, SidecarDiagnostic,
+    SidecarEvidence, SidecarField, WalEvidence, WalFrame,
+};
 mod session;
 mod topology;
 pub use btree::{
@@ -121,6 +126,7 @@ pub struct PageEntity {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectionGraph {
+    pub sidecars: Vec<SidecarEvidence>,
     pub revision: u64,
     pub coverage: Coverage,
     pub snapshot: DatabaseSnapshot,

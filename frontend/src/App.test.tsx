@@ -6,6 +6,7 @@ import { App, type InspectionGraph, type SessionStatus } from "./App";
 
 const graph: InspectionGraph = {
   revision: 1,
+  sidecars: [],
   pointerMap: { diagnostics: [], applicable: false, complete: true, largestRoot: { value: 0, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 52, fileOffset: 52, length: 4 }, validationRule: "sqlite_header_largest_root" } }, incrementalVacuum: { value: 0, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 64, fileOffset: 64, length: 4 }, validationRule: "sqlite_header_incremental_vacuum" } }, locations: [], layout: null, lockBytePage: null, pages: [] },
   freelist: { firstTrunk: { value: 0, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 32, fileOffset: 32, length: 4 }, validationRule: "sqlite_header_first_freelist_trunk" } }, declaredCount: null, trunks: [], coverage: { reason: "complete", stoppingClaim: null, evaluatedPages: 0, remainder: 0 } },
   coverage: { scope: "page_inventory", evaluated: 3, total: 3, nextPage: null, reason: "complete", remainder: 0 },
@@ -76,7 +77,7 @@ const graph: InspectionGraph = {
 
 const published: SessionStatus = {
   snapshotId: "snapshot-fixture", source: graph.snapshot.source, state: "published",
-  progress: { unit: "pages", completed: 3, total: 3, verifying: false, buildingTopology: false }, revision: 1, coverage: graph.coverage, diagnostic: null,
+  progress: { unit: "pages", completed: 3, total: 3, verifying: false, buildingTopology: false, buildingSidecars: false }, revision: 1, coverage: graph.coverage, diagnostic: null,
 };
 
 function respond(status: () => SessionStatus) {
@@ -87,6 +88,29 @@ function respond(status: () => SessionStatus) {
 }
 
 describe("page atlas", () => {
+  it("keeps sidecar consequences visible while selecting main-file pages", async () => {
+    const snapshot = structuredClone(graph);
+    Object.assign(snapshot, { sidecars: ["wal", "journal", "shm"].map(kind => ({
+      kind, displayName: `customer-data.sqlite-${kind}`, length: "32", state: "malformed",
+      consequence: kind === "wal" ? "wal_not_applied" : kind === "journal" ? "rollback_not_applied" : "shm_non_authoritative",
+      fields: [{ name: "version", value: 3007000, offset: "4", length: 4 }],
+      diagnostics: [{ code: "fixture_header_truncated", offset: "0", length: "32" }],
+      coverage: { scope: "header", reason: "validation_stop", evaluatedBytes: "32", remainingBytes: "0" },
+      wal: null, journal: null, shm: null,
+    })) });
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: () => Promise.resolve(url.endsWith("/revisions/1") ? snapshot : published) })));
+    const { container } = render(<App />);
+    expect(await screen.findByRole("heading", { name: "Physical main-file image" })).toBeTruthy();
+    expect(screen.getByText(/WAL not applied/)).toBeTruthy();
+    expect(screen.getByText(/Rollback not applied/)).toBeTruthy();
+    expect(screen.getByText(/SHM is non-authoritative/)).toBeTruthy();
+    fireEvent.click(container.querySelector('[data-page-number="2"]')!);
+    expect(screen.getByRole("heading", { name: "Page 2" })).toBeTruthy();
+    expect(screen.getByText(/WAL not applied/)).toBeTruthy();
+    expect(screen.getByText("Selected evidence belongs to the physical main-file image. Sidecar changes are not applied.")).toBeTruthy();
+    expect(screen.getAllByText(/fixture_header_truncated/)).toHaveLength(3);
+  });
+
   beforeEach(() => {
     window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
     respond(() => published);
@@ -186,7 +210,7 @@ describe("page atlas", () => {
 
   it("shows progress without a mosaic, then adopts only the published revision", async () => {
     let status: SessionStatus = { ...published, state: "scanning", revision: null, coverage: null,
-      progress: { unit: "pages", completed: 1, total: 3, verifying: false, buildingTopology: false } };
+      progress: { unit: "pages", completed: 1, total: 3, verifying: false, buildingTopology: false, buildingSidecars: false } };
     respond(() => status);
     const { container } = render(<App />);
     expect(await screen.findByRole("heading", { name: "Scanning" })).toBeTruthy();
