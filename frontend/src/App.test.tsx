@@ -468,3 +468,16 @@ it("cancels a pending selected-cell job without fetching values", async () => {
   expect(screen.queryByRole("region", { name: "Selected stored values" })).toBeNull();
   cleanup(); vi.unstubAllGlobals();
 });
+
+it("labels a refused oversized web projection without showing a partial mosaic", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve(
+    url.includes("/revisions/")
+      ? { ok: false, status: 507, json: () => Promise.resolve({ state: "budget_stopped", reason: "response_byte_budget" }) }
+      : { ok: true, json: () => Promise.resolve(published) }
+  )));
+  const { container } = render(<App />);
+  expect(await screen.findByText("Web response limit reached. No partial inspection was returned.")).toBeTruthy();
+  expect(container.querySelectorAll("[data-page-number]")).toHaveLength(0);
+  cleanup(); vi.unstubAllGlobals();
+});

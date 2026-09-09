@@ -34,12 +34,15 @@ async fn serves_the_real_graph_and_embedded_atlas_without_disclosing_its_path() 
     write_fixture(&database_path);
     let session = Arc::new(InspectionSession::open(&database_path).expect("valid database"));
     let snapshot_id = session.status().snapshot_id;
+    let entry = format!("/sessions/{}", session.status().session_id);
     let app = atlas_router(session);
 
     let api_response = app
         .clone()
         .oneshot(
             Request::builder()
+                .header("host", "localhost")
+                .header("origin", "http://localhost")
                 .uri(format!("/api/snapshots/{snapshot_id}/revisions/1"))
                 .body(Body::empty())
                 .expect("API request"),
@@ -67,7 +70,9 @@ async fn serves_the_real_graph_and_embedded_atlas_without_disclosing_its_path() 
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/")
+                .header("host", "localhost")
+                .header("origin", "http://localhost")
+                .uri(&entry)
                 .body(Body::empty())
                 .expect("atlas request"),
         )
@@ -85,6 +90,8 @@ async fn serves_the_real_graph_and_embedded_atlas_without_disclosing_its_path() 
     let asset_response = app
         .oneshot(
             Request::builder()
+                .header("host", "localhost")
+                .header("origin", "http://localhost")
                 .uri("/assets/app.js")
                 .body(Body::empty())
                 .expect("asset request"),
@@ -110,6 +117,8 @@ async fn rejects_a_snapshot_identifier_from_another_session() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("host", "localhost")
+                .header("origin", "http://localhost")
                 .uri("/api/snapshots/not-this-snapshot")
                 .body(Body::empty())
                 .expect("API request"),
@@ -121,9 +130,16 @@ async fn rejects_a_snapshot_identifier_from_another_session() {
 }
 
 async fn get(app: axum::Router, uri: &str) -> axum::response::Response {
-    app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-        .await
-        .unwrap()
+    app.oneshot(
+        Request::builder()
+            .header("host", "localhost")
+            .header("origin", "http://localhost")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -185,6 +201,8 @@ async fn cancellation_publishes_an_explicit_partial_revision() {
         .clone()
         .oneshot(
             Request::builder()
+                .header("host", "localhost")
+                .header("origin", "http://localhost")
                 .method("POST")
                 .uri(format!("{base}/cancel"))
                 .body(Body::empty())
@@ -250,6 +268,8 @@ async fn deep_values_require_the_exact_posted_selector_and_never_enter_broad_rou
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("host", "localhost")
+                    .header("origin", "http://localhost")
                     .method("POST")
                     .uri(&result_url)
                     .header(header::CONTENT_TYPE, "application/json")

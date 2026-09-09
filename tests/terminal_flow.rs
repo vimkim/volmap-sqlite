@@ -230,6 +230,8 @@ async fn adapters_show_the_same_snapshot_coordinates_diagnostics_and_sidecars() 
     let response = volmap_sqlite::web::atlas_router(Arc::clone(&session))
         .oneshot(
             Request::builder()
+                .header("host", "localhost")
+                .header("origin", "http://localhost")
                 .uri(format!("/api/snapshots/{snapshot}/revisions/1"))
                 .body(Body::empty())
                 .unwrap(),

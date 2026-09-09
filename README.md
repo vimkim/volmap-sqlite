@@ -280,3 +280,59 @@ alternate screen on normal exit and propagated terminal errors.
 compares the shared fixture through both adapters, and launches the production
 binary through a real PTY. That lifecycle harness requires Python 3 for tests;
 the distributed executable has no Python dependency.
+
+Web sessions default to `127.0.0.1:3000`. An explicit `--listen 0.0.0.0:3000`
+(or an explicit IPv6 address) permits remote access and always prints a warning:
+there is no built-in authentication or TLS, and operator-controlled network
+protection is required. For wildcard listeners, the printed URL uses loopback;
+remote operators replace that IP with the server's numeric address. Numeric IPs
+and loopback `localhost` are accepted at the bound port; arbitrary DNS Host names
+are rejected to prevent DNS rebinding. SSH forwarding must preserve the port.
+A trusted reverse proxy must normalize Host and Origin to the chosen backend
+origin; forwarded headers do not independently grant access.
+
+The printed `/sessions/{session_id}` entry expires with the process. `/` redirects
+to the active entry. Every API snapshot UUID is freshly generated for that session;
+foreign snapshots, entry links, and job IDs do not resolve. Source IDs are opaque
+output identities, not filesystem selectors. Queries are not supported and are
+rejected, including requested collection limits. Deep selectors are JSON bodies
+with bounded numeric fields and must match the active session and snapshot.
+Historical revisions remain readable; starting new deep work requires the current
+revision. Stored results require the exact original cell selector.
+
+All assets are embedded and all browser requests stay on the chosen origin.
+HTTP responses carry `no-store`, `no-cache` compatibility semantics, a restrictive
+Content Security Policy, MIME-sniffing and framing protection, no-referrer policy,
+and same-origin resource/opener policies. Bootstrap JavaScript is a session-scoped
+external asset, so inline scripts are not permitted. POST requests require a
+matching `Origin`; foreign origins and cross-site/same-site browser requests are
+rejected. There is no CORS opt-in, access logging, telemetry, or outbound client.
+Paths and rejected request contents are not echoed in HTTP errors.
+
+Web admission ceilings are 512 URI bytes, 8 KiB of header names/values, 4 KiB of
+body data, five seconds to receive a body, and eight simultaneous admitted
+requests. Sixty-four accepted TCP connections bound transport residency, including
+clients that stall before sending headers or while reading responses. Connections
+expire after 30 seconds; normal browser polling reconnects. These are transport
+limits, not inspection-work cancellation. Disconnecting a request does not release
+its work slot before its handler finishes. Deep work also retains the separate
+session job and worker ceilings described above.
+
+JSON encoding stops at 8 MiB or 100,000 items in any array, without emitting a
+truncated graph or partial selected values. Assets share the response byte ceiling.
+Operators may lower the defaults with `--max-web-response-bytes` (minimum 1024),
+`--max-web-collection-items` (minimum 1), and `--max-web-requests` (minimum 1).
+These are admission ceilings, not database-corruption findings or performance
+promises. HTTP 507 reports a `budget_stopped` response with a byte/collection reason;
+413, 414, 431, 408, and 429 distinguish body, URI, header, body-timeout, and
+concurrency limits. Oversized graphs are refused rather than sampled; pagination
+and larger-scale projections belong to subsequent work. Lowering limits can also
+withhold status, assets, and selected results; a completed deep job still leaves
+its immutable revision intact even if its result exceeds the web response limit.
+
+`cargo test --test web_security` starts production processes and exercises actual
+HTTP listeners, origins, headers, selectors, disclosure, resource bounds, and
+startup/log privacy. It requires Python 3 and Linux `strace`; syscall tracing asserts
+that the server makes no outbound connections. Set `VOLMAP_TEST_CHROMIUM` to a
+Chromium headless-shell executable to additionally boot the embedded UI under CSP
+and check its network log for requests outside the selected origin.

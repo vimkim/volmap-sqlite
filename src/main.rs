@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 use volmap_sqlite::inspection::{
     InspectionSession, ScanControl, SchemaBudget, SidecarBudget, TraversalBudget,
 };
-use volmap_sqlite::web::atlas_router;
+use volmap_sqlite::web::{WebLimits, atlas_router_for_listener, bounded_listener};
 
 #[derive(Debug, Parser)]
 #[command(name = "volmap-sqlite", about = "Inspect a frozen SQLite main file")]
@@ -57,6 +57,18 @@ struct Arguments {
     /// Address for the embedded browser viewer.
     #[arg(long, default_value = "127.0.0.1:3000")]
     listen: SocketAddr,
+
+    /// Maximum serialized web response bytes (1024..=8388608).
+    #[arg(long, default_value_t = 8 * 1024 * 1024, value_parser = clap::value_parser!(u32).range(1024..=8_388_608))]
+    max_web_response_bytes: u32,
+
+    /// Maximum items in any web response collection (1..=100000).
+    #[arg(long, default_value_t = 100_000, value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    max_web_collection_items: u32,
+
+    /// Maximum concurrent admitted HTTP requests (1..=8).
+    #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u32).range(1..=8))]
+    max_web_requests: u32,
 
     /// Maximum number of pages retained in each B-tree traversal prefix (minimum 1).
     #[arg(long, default_value_t = u32::MAX, value_parser = clap::value_parser!(u32).range(1..))]
@@ -119,32 +131,58 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         return Ok(());
     }
-    serve(session, arguments.listen)
+    serve(
+        session,
+        arguments.listen,
+        WebLimits {
+            response_bytes: arguments.max_web_response_bytes as usize,
+            collection_items: arguments.max_web_collection_items as usize,
+            concurrent_requests: arguments.max_web_requests as usize,
+        },
+    )
 }
 
 #[tokio::main]
-async fn serve(session: Arc<InspectionSession>, listen: SocketAddr) -> Result<(), Box<dyn Error>> {
+async fn serve(
+    session: Arc<InspectionSession>,
+    listen: SocketAddr,
+    limits: WebLimits,
+) -> Result<(), Box<dyn Error>> {
     let display_name = session.status().source.display_name;
 
     if !listen.ip().is_loopback() {
         eprintln!(
-            "warning: the viewer is listening beyond loopback and provides no authentication or TLS"
+            "WARNING: non-loopback viewer has no built-in authentication or TLS. Operator-controlled network protection is required."
         );
     }
 
     let listener = TcpListener::bind(listen).await?;
     let address = listener.local_addr()?;
     eprintln!("Inspecting {display_name}");
-    eprintln!("Page atlas: http://{address}/");
+    let mut entry_address = address;
+    if address.ip().is_unspecified() {
+        entry_address.set_ip(if address.is_ipv4() {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else {
+            std::net::Ipv6Addr::LOCALHOST.into()
+        });
+    }
+    eprintln!(
+        "Page atlas: http://{entry_address}/sessions/{}",
+        session.status().session_id
+    );
     let scan_session = Arc::clone(&session);
     let worker = tokio::task::spawn_blocking(move || scan_session.scan(|_| ScanControl::Continue));
     let shutdown_session = Arc::clone(&session);
-    let server = axum::serve(listener, atlas_router(session))
-        .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            let _ = shutdown_session.stop(ScanControl::Cancel);
-        })
-        .await;
+    let server = axum::serve(
+        bounded_listener(listener),
+        atlas_router_for_listener(session, address, limits),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = shutdown_session.stop(ScanControl::Cancel);
+    })
+    .await;
     let _ = worker.await?;
     server?;
     Ok(())

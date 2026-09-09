@@ -376,6 +376,7 @@ export function App() {
     async function poll() {
       try {
         const response = await fetch(base, { cache: "no-store", signal: abort.signal });
+        if (response.status === 507) throw new Error("Web response limit reached. No partial inspection was returned.");
         if (!response.ok) throw new Error(`Inspection request failed (${response.status})`);
         let next: SessionStatus = await response.json();
         if (next.state === "invalidated" || next.revision === null) cached = null;
@@ -385,6 +386,7 @@ export function App() {
             next = await revision.json();
             cached = null;
           } else {
+            if (revision.status === 507) throw new Error("Web response limit reached. No partial inspection was returned.");
             if (!revision.ok) throw new Error("Published revision unavailable");
             cached = await revision.json();
           }
