@@ -23,9 +23,11 @@ thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 
-[dev-dependencies]
-rusqlite = { version = "0.37.0", features = ["bundled"] }
+rusqlite = { version = "0.37.0", features = ["bundled", "hooks", "limits", "modern_sqlite", "trace"] }
 tempfile = "3.21.0"
+rustix = { version = "1.1.4", features = ["process"] }
+
+[dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }
 
 [lints.rust]
@@ -34,3 +36,7 @@ unsafe_code = "forbid"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+[[test]]
+name = "semantic_metadata"
+harness = false

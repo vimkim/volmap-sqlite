@@ -16,6 +16,10 @@ type TextEncoding = "utf8" | "utf16_le" | "utf16_be";
 type TopologyPhase = "pointer_map_validation" | "pointer_map_reconciliation" | "pointer_map_inspection" | "role_reconciliation" | "allocation_reconciliation" | "freelist_inspection" | "btree_claim_collection" | "btree_claim_validation" | "btree_parent_reconciliation" | "btree_cycle_reconciliation" | "btree_relationship_normalization" | "btree_traversal" | "overflow_inspection" | "overflow_reconciliation" | "overflow_relationship_normalization" | "complete";
 
 export interface InspectionGraph {
+  semanticMetadata: {
+    state: "available" | "unavailable";
+    tables: { identity: { pageNumber: number; index: number }; columnCount: number; strict: boolean; withoutRowid: boolean }[];
+  };
   deepInspections: DeepEvidence[];
   schema: SchemaEvidence;
   sidecars: SidecarEvidence[];

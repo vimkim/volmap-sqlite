@@ -170,3 +170,48 @@ Requests exceeding them receive a terminal budget-stopped receipt and are not re
 Invalid targets consume no admission slot. Accepted jobs and old revisions remain
 available for the session lifetime. Revision preparation currently copies the graph
 outside publication locks; cancellation prevents publication after preparation.
+
+Opt into optional schema descriptions with `--semantic-metadata`. Schema flow then
+labels ordinary tables with their declared column count (including generated
+columns), `STRICT` status, and `WITHOUT ROWID` status. These descriptions live in
+`semanticMetadata`, separate from directly parsed declarations, attribution,
+diagnostics, coverage, identities, and selected values. Disabled or failed
+enrichment is shown as unavailable; it does not change inspection coverage.
+
+The same executable runs a private helper before starting any web runtime in the
+child. The parent copies only accepted main-file bytes into a fresh private
+directory and launches the helper with a fixed version token on stdin. Neither
+source paths nor SQL are protocol inputs. SQLite opens the copy read-only and
+immutable, so it cannot apply the original WAL/journal. The reply contains only
+name hashes, bounded counts, booleans, and a fixed query-audit mask. The parent
+matches hashes to unique directly parsed table objects and attaches descriptions
+by their existing physical cell identities. Names and declaration text are never
+returned by SQLite over this protocol.
+
+The helper disables trusted schema, views, and triggers before reading schema.
+It registers no functions, extensions, or modules. A deny-by-default authorizer
+permits only the fixed schema read and table metadata pragma; statement tracing
+rejects any other executed SQL. Because SQLite's `table_list` may initialize views
+and virtual tables, the preceding schema read refuses schemas containing views
+or any declaration containing `VIRTUAL` (case-insensitive, including comments and
+quoted names). Rootless declarations remain available through direct parsing.
+A partial or unavailable direct schema refuses the helper before it starts, so
+the configured record budget never relies on an incomplete record count.
+This conservative refusal also applies to unsupported, ambiguous, and damaged
+schemas; v1 does not promise semantic descriptions for every valid database.
+
+Configure lower operational budgets with `--max-semantic-bytes`,
+`--max-semantic-records`, `--max-semantic-ms`, and
+`--max-semantic-output-bytes`, or `InspectionSession::with_semantic_metadata_budget`.
+Zero withholds optional metadata. Larger requests are clamped to the fixed
+security ceilings; they cannot relax SQLite containment.
+
+The fixed security ceilings are 64 MiB of copied input, 1,024 schema records,
+256 columns per table, 64 KiB SQL/record strings, expression depth 32, compound
+SELECT count 8, 10,000 VM program instructions, and 100,000 executed VM steps.
+SQLite's heap ceiling is 16 MiB; the child also has a 256 MiB address-space limit,
+two CPU seconds, and disabled core/file output. The parent enforces two wall-clock
+seconds across copying and subprocess work and caps protocol output at 256 KiB.
+Limits are installed before untrusted schema processing. Failure, refusal,
+resource exhaustion, malformed replies, crashes, and timeouts all withhold the
+entire description result. Frozen-input checks still run before publication.

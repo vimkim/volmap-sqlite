@@ -134,6 +134,7 @@ pub struct PageEntity {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectionGraph {
+    pub semantic_metadata: crate::semantic::SemanticMetadata,
     pub deep_inspections: Vec<DeepEvidence>,
     pub schema: SchemaEvidence,
     pub sidecars: Vec<SidecarEvidence>,

@@ -10,6 +10,7 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
     ok: true,
     json: () => Promise.resolve(url.endsWith("/revisions/1") ? {
       revision: 1,
+      semanticMetadata: { state: "unavailable", tables: [] },
       deepInspections: [],
       sidecars: [],
   schema: { state: "complete", objects: [{ identity: { pageNumber: 1, index: 0 }, evidence: [], objectType: "view", name: "declared_view", tableName: "declared_view", rootPage: "0", root: null, pages: [], declaration: "CREATE VIEW declared_view AS SELECT absent_function()", state: "declaration_only", diagnostics: [] }], diagnostics: [], maxDecodedBytes: "16777216", decodedBytes: "0", stoppingCell: null },

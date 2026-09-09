@@ -18,6 +18,26 @@ struct Arguments {
     /// Frozen `SQLite` main file to inspect.
     database: PathBuf,
 
+    /// Enable bounded, descriptive `SQLite` schema metadata.
+    #[arg(long)]
+    semantic_metadata: bool,
+
+    /// Maximum bytes copied for optional metadata (security ceiling: 64 MiB).
+    #[arg(long, default_value_t = 64 * 1024 * 1024)]
+    max_semantic_bytes: u64,
+
+    /// Maximum schema records considered for optional metadata (ceiling: 1024).
+    #[arg(long, default_value_t = 1024)]
+    max_semantic_records: usize,
+
+    /// Optional metadata wall-clock budget in milliseconds (ceiling: 2000).
+    #[arg(long, default_value_t = 2000)]
+    max_semantic_ms: u64,
+
+    /// Maximum optional metadata protocol bytes (ceiling: 256 KiB).
+    #[arg(long, default_value_t = 256 * 1024)]
+    max_semantic_output_bytes: u64,
+
     /// Address for the embedded browser viewer.
     #[arg(long, default_value = "127.0.0.1:3000")]
     listen: SocketAddr,
@@ -43,10 +63,17 @@ struct Arguments {
     max_schema_bytes: u64,
 }
 
+fn main() -> Result<(), Box<dyn Error>> {
+    if std::env::args().nth(1).as_deref() == Some("--private-semantic-helper") {
+        std::process::exit(volmap_sqlite::semantic::run_private_helper());
+    }
+    serve()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn serve() -> Result<(), Box<dyn Error>> {
     let arguments = Arguments::parse();
-    let session = Arc::new(InspectionSession::begin_with_schema_budget(
+    let session = InspectionSession::begin_with_schema_budget(
         &arguments.database,
         TraversalBudget::with_total_pages(
             arguments.max_btree_pages,
@@ -59,7 +86,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         SchemaBudget {
             max_decoded_bytes: arguments.max_schema_bytes,
         },
-    )?);
+    )?;
+    let session = Arc::new(if arguments.semantic_metadata {
+        session.with_semantic_metadata_budget(volmap_sqlite::semantic::SemanticBudget {
+            max_copy_bytes: arguments.max_semantic_bytes,
+            max_schema_records: arguments.max_semantic_records,
+            timeout_ms: arguments.max_semantic_ms,
+            max_output_bytes: arguments.max_semantic_output_bytes,
+        })
+    } else {
+        session
+    });
     let display_name = session.status().source.display_name;
 
     if !arguments.listen.ip().is_loopback() {

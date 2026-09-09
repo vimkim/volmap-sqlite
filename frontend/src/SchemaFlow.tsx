@@ -64,6 +64,8 @@ export function SchemaFlow({ graph, object, selection, onSelect }: {
   graph: InspectionGraph; object: SchemaObject | undefined; selection: EntitySelector; onSelect: (selector: EntitySelector) => void;
 }) {
   if (!object) return <section className="schema-flow"><h2>Semantic projection</h2><p>Select a schema object to follow its storage evidence.</p></section>;
+  const description = graph.semanticMetadata?.tables.find(table => table.identity.pageNumber === object.identity.pageNumber
+    && table.identity.index === object.identity.index);
   const pages = new Set(object.pages.map(page => page.pageNumber));
   const selectedPage = pages.has(selection.pageNumber) ? graph.pages.find(page => page.number === selection.pageNumber) : undefined;
   const parents = new Map(graph.relationships.filter(link => link.kind === "btree_child"
@@ -76,6 +78,9 @@ export function SchemaFlow({ graph, object, selection, onSelect }: {
       <p>{object.objectType ?? "unknown"} · Related table: {object.tableName ?? "unavailable"}</p>
       <p>State: {object.state.replaceAll("_", " ")} · Root claim: {object.rootPage ?? "NULL"}</p>
       {object.declaration !== null ? <pre>{object.declaration}</pre> : <p>No declaration text available (implicit indexes may store NULL).</p>}
+      <p aria-label="Descriptive semantic metadata">{description
+        ? `Descriptive SQLite metadata: ${description.columnCount} declared columns · ${description.strict ? "STRICT" : "non-STRICT"} · ${description.withoutRowid ? "WITHOUT ROWID" : "rowid table"}.`
+        : "Descriptive SQLite metadata unavailable."}</p>
       {object.diagnostics.map(code => <p key={code} className="diagnostics">{code.replaceAll("_", " ")}</p>)}
       <details><summary>Physical schema record evidence</summary>
         {object.evidence.map((evidence, index) => <p key={index}>

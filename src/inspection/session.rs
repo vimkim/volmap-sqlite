@@ -401,6 +401,7 @@ impl SessionData {
         reason: CoverageReason,
         mut topology: super::topology::Topology,
         schema: super::SchemaEvidence,
+        semantic_metadata: crate::semantic::SemanticMetadata,
     ) {
         let coverage = self.coverage(reason);
         if let Some(snapshot) = &self.snapshot {
@@ -414,6 +415,7 @@ impl SessionData {
                 page.classification = classification;
             }
             self.published = Some(Arc::new(InspectionGraph {
+                semantic_metadata,
                 deep_inspections: vec![],
                 schema,
                 sidecars: self.sidecars.clone(),
@@ -442,6 +444,7 @@ impl SessionData {
 
 /// Owns accepted input handles and publishes only immutable, validated revisions.
 pub struct InspectionSession {
+    semantic_metadata: Option<crate::semantic::SemanticBudget>,
     deep_limits: DeepLimits,
     deep_jobs: Mutex<std::collections::BTreeMap<String, Arc<DeepJob>>>,
     data: Mutex<SessionData>,
@@ -516,6 +519,7 @@ impl InspectionSession {
             .map(AcceptedInput::sidecar_evidence)
             .collect();
         Ok(Self {
+            semantic_metadata: None,
             deep_limits: DeepLimits::default(),
             deep_jobs: Mutex::new(std::collections::BTreeMap::new()),
             active_checks: AtomicUsize::new(0),
@@ -559,6 +563,23 @@ impl InspectionSession {
                 sidecars,
             }),
         })
+    }
+
+    /// Opts into descriptive metadata from a bounded private subprocess of this executable.
+    /// Call before scanning; unavailable enrichment never changes physical evidence.
+    #[must_use]
+    pub fn with_semantic_metadata(self) -> Self {
+        self.with_semantic_metadata_budget(crate::semantic::SemanticBudget::default())
+    }
+
+    /// Enables semantic descriptions with operational budgets capped by fixed security ceilings.
+    #[must_use]
+    pub fn with_semantic_metadata_budget(
+        mut self,
+        budget: crate::semantic::SemanticBudget,
+    ) -> Self {
+        self.semantic_metadata = Some(budget);
+        self
     }
 
     /// Accepts inputs and finishes the page inventory synchronously.
@@ -652,26 +673,14 @@ impl InspectionSession {
                 )
             },
         );
-        let schema_budget = {
-            let mut data = self.lock();
-            data.status.progress.building_schema = true;
-            data.schema_budget
-        };
-        let schema = snapshot.as_ref().map_or_else(
-            || super::SchemaEvidence::unavailable(schema_budget),
-            |snapshot| {
-                super::schema::inspect(
-                    &inputs.file,
-                    &snapshot.geometry,
-                    &pages,
-                    &topology,
-                    &cancellation,
-                    schema_budget,
-                    &mut checkpoint,
-                )
-            },
+        let schema = self.inspect_schema(
+            &inputs,
+            snapshot.as_ref(),
+            &pages,
+            &topology,
+            &cancellation,
+            &mut checkpoint,
         );
-        self.lock().status.progress.building_schema = false;
         self.inspect_sidecars(
             &inputs,
             snapshot.as_ref().map_or(0, |s| s.geometry.page_size),
@@ -679,6 +688,14 @@ impl InspectionSession {
             &cancellation,
             &mut checkpoint,
         );
+        let semantic_metadata = match self.semantic_metadata {
+            Some(budget) if reason == CoverageReason::Complete => {
+                crate::semantic::enrich(&inputs.file, &schema, budget, || {
+                    cancellation.traversal_reason().is_some()
+                })
+            }
+            _ => crate::semantic::SemanticMetadata::unavailable(),
+        };
         drop(pages);
         let (publish_state, publish_reason, pending_stop) = {
             let mut d = self.lock();
@@ -713,8 +730,46 @@ impl InspectionSession {
         {
             return Err(InspectionError::NotScanning);
         }
-        d.publish(publish_state, publish_reason, topology, schema);
+        d.publish(
+            publish_state,
+            publish_reason,
+            topology,
+            schema,
+            semantic_metadata,
+        );
         Ok(())
+    }
+
+    fn inspect_schema(
+        &self,
+        inputs: &Inputs,
+        snapshot: Option<&DatabaseSnapshot>,
+        pages: &[PageEntity],
+        topology: &super::topology::Topology,
+        cancellation: &super::topology::WorkControl,
+        checkpoint: &mut impl FnMut(),
+    ) -> super::SchemaEvidence {
+        let schema_budget = {
+            let mut data = self.lock();
+            data.status.progress.building_schema = true;
+            data.schema_budget
+        };
+        let schema = snapshot.map_or_else(
+            || super::SchemaEvidence::unavailable(schema_budget),
+            |snapshot| {
+                super::schema::inspect(
+                    &inputs.file,
+                    &snapshot.geometry,
+                    pages,
+                    topology,
+                    cancellation,
+                    schema_budget,
+                    checkpoint,
+                )
+            },
+        );
+        self.lock().status.progress.building_schema = false;
+        schema
     }
 
     fn inspect_sidecars(

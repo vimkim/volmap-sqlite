@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, type InspectionGraph, type SessionStatus } from "./App";
 
 const graph: InspectionGraph = {
+  semanticMetadata: { state: "unavailable", tables: [] },
   deepInspections: [],
   revision: 1,
   sidecars: [],
