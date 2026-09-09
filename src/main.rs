@@ -18,6 +18,22 @@ struct Arguments {
     /// Frozen `SQLite` main file to inspect.
     database: PathBuf,
 
+    /// Launch the keyboard-oriented terminal inspection flow.
+    #[arg(long)]
+    terminal: bool,
+
+    /// Terminal deep-inspection payload-byte request budget.
+    #[arg(long, default_value_t = 16 * 1024 * 1024)]
+    max_deep_bytes: u64,
+
+    /// Terminal deep-inspection overflow-page request budget.
+    #[arg(long, default_value_t = 32768)]
+    max_deep_overflow_pages: u32,
+
+    /// Terminal deep-inspection decoded-value request budget.
+    #[arg(long, default_value_t = 4096)]
+    max_deep_values: u32,
+
     /// Enable bounded, descriptive `SQLite` schema metadata.
     #[arg(long)]
     semantic_metadata: bool,
@@ -67,11 +83,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args().nth(1).as_deref() == Some("--private-semantic-helper") {
         std::process::exit(volmap_sqlite::semantic::run_private_helper());
     }
-    serve()
-}
-
-#[tokio::main]
-async fn serve() -> Result<(), Box<dyn Error>> {
     let arguments = Arguments::parse();
     let session = InspectionSession::begin_with_schema_budget(
         &arguments.database,
@@ -97,15 +108,31 @@ async fn serve() -> Result<(), Box<dyn Error>> {
     } else {
         session
     });
+    if arguments.terminal {
+        volmap_sqlite::terminal::run(
+            session,
+            volmap_sqlite::inspection::DeepBudget {
+                max_payload_bytes: arguments.max_deep_bytes,
+                max_overflow_pages: arguments.max_deep_overflow_pages,
+                max_values: arguments.max_deep_values,
+            },
+        )?;
+        return Ok(());
+    }
+    serve(session, arguments.listen)
+}
+
+#[tokio::main]
+async fn serve(session: Arc<InspectionSession>, listen: SocketAddr) -> Result<(), Box<dyn Error>> {
     let display_name = session.status().source.display_name;
 
-    if !arguments.listen.ip().is_loopback() {
+    if !listen.ip().is_loopback() {
         eprintln!(
             "warning: the viewer is listening beyond loopback and provides no authentication or TLS"
         );
     }
 
-    let listener = TcpListener::bind(arguments.listen).await?;
+    let listener = TcpListener::bind(listen).await?;
     let address = listener.local_addr()?;
     eprintln!("Inspecting {display_name}");
     eprintln!("Page atlas: http://{address}/");

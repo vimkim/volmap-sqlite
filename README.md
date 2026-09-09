@@ -215,3 +215,68 @@ seconds across copying and subprocess work and caps protocol output at 256 KiB.
 Limits are installed before untrusted schema processing. Failure, refusal,
 resource exhaustion, malformed replies, crashes, and timeouts all withhold the
 entire description result. Frozen-input checks still run before publication.
+
+Launch the terminal inspection flow with:
+
+```sh
+cargo run -- database.sqlite --terminal
+```
+
+The same production executable supplies the Crossterm terminal adapter, optional
+metadata helper, and browser adapter. Terminal mode requires interactive stdin and
+stdout; it does not fall back to printing application data when redirected. The
+existing scan and semantic budgets also apply in terminal mode. Inspection runs
+in a worker while keyboard input and scan progress remain available.
+
+The terminal presents a focused list and evidence pane. Start with schema objects,
+B-tree storage, freelist, pointer maps, or diagnostics, then enter a page and cell.
+The breadcrumb preserves the route taken; returning restores the previous list
+selection. The evidence pane uses shared graph coordinates, classifications,
+role claims, relationships, pointer-map entries, diagnostics, and coverage.
+It does not read or reinterpret database bytes. Snapshot identity is shown at the
+database entry point; main-file mode, sidecars, revision, coverage, and deep-work
+status stay in the frame header.
+
+| Key | Action |
+| --- | --- |
+| Up/Down or k/j | Move in the focused list |
+| Enter or Right | Enter the highlighted target |
+| Esc, Backspace, or Left | Return to the previous context; cancel the selector prompt |
+| PgUp/PgDn | Scroll focused evidence by the visible pane height |
+| h/l; 0 | Scroll evidence horizontally; reset both scroll positions |
+| g, then `page` or `page:cell`, Enter | Resolve a physical selector in the current revision |
+| d | Explicitly deep-inspect the selected cell |
+| c | Cancel pending deep/fast work and hide values |
+| s | Stop the fast scan with explicit partial coverage |
+| `[` / `]` | Select the previous/next available revision |
+| ! | Open diagnostics |
+| ? | Open help |
+| q or Ctrl-C | Quit and restore normal terminal input |
+
+Set terminal deep request budgets with `--max-deep-bytes`,
+`--max-deep-overflow-pages`, and `--max-deep-values`, or configure the harness with
+`TerminalFlow::with_deep_budget`. Defaults are 16 MiB, 32,768 overflow pages, and
+4,096 values. The shared session enforces its admission ceilings; requests that
+exceed them produce a budget-stopped outcome without values.
+
+Deep inspection uses the shared asynchronous job and exact-selector result API.
+Successful work selects its new revision only while the original cell remains
+selected. Leaving the cell, changing revision, or cancelling hides values; a late
+completion never restores a disclosure after navigation. BLOBs show typed lengths,
+not bytes. Invalidated snapshots withhold navigation and values and label retained
+observations as diagnostic evidence. Old published revisions remain immutable.
+
+Frames adapt to terminal resize and keep bounded display widths. Below 40 columns
+or 16 rows, a labelled compact layout retains the list and evidence pane while
+space permits. Vertical scrolling advances by the visible pane height, so even a
+one-line evidence pane can reach every row. Horizontal scrolling exposes long
+schema declarations and typed-value tails. Long breadcrumbs retain the active
+path suffix; the complete path is also available as scrollable evidence. Unicode names remain readable;
+control characters and directional overrides are escaped before terminal output.
+The terminal guard restores raw mode, cursor visibility, line wrapping, and the
+alternate screen on normal exit and propagated terminal errors.
+
+`cargo test --test terminal_flow` exercises visible frames and keyboard actions,
+compares the shared fixture through both adapters, and launches the production
+binary through a real PTY. That lifecycle harness requires Python 3 for tests;
+the distributed executable has no Python dependency.

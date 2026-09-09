@@ -5,3 +5,5 @@ pub mod web;
 
 #[doc(hidden)]
 pub mod semantic;
+
+pub mod terminal;
