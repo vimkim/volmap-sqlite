@@ -9,12 +9,14 @@ import { PointerMap, type PointerMapEvidence } from "./PointerMap";
 import { Sidecars, type SidecarEvidence } from "./Sidecars";
 import { Freelist, type FreelistEvidence } from "./Freelist";
 
+import { DeepCell, type DeepEvidence } from "./DeepCell";
 import { SchemaFlow, SchemaObjects, schemaSelector, selectorKey, type EntitySelector, type SchemaEvidence } from "./SchemaFlow";
 
 type TextEncoding = "utf8" | "utf16_le" | "utf16_be";
 type TopologyPhase = "pointer_map_validation" | "pointer_map_reconciliation" | "pointer_map_inspection" | "role_reconciliation" | "allocation_reconciliation" | "freelist_inspection" | "btree_claim_collection" | "btree_claim_validation" | "btree_parent_reconciliation" | "btree_cycle_reconciliation" | "btree_relationship_normalization" | "btree_traversal" | "overflow_inspection" | "overflow_reconciliation" | "overflow_relationship_normalization" | "complete";
 
 export interface InspectionGraph {
+  deepInspections: DeepEvidence[];
   schema: SchemaEvidence;
   sidecars: SidecarEvidence[];
   revision: number;
@@ -68,6 +70,8 @@ interface Coverage {
 }
 
 export interface SessionStatus {
+  sessionId: string;
+  availableRevisions: number[];
   snapshotId: string;
   source: { id: string; displayName: string };
   state: "scanning" | "published" | "cancelled" | "stopped" | "invalidated" | "fatal";
@@ -89,7 +93,7 @@ const encodingLabel: Record<TextEncoding, string> = {
   utf16_be: "UTF-16 BE",
 };
 
-function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatus }) {
+function Atlas({ graph, status, viewRevision, onRevision }: { graph: InspectionGraph; status: SessionStatus; viewRevision: number | null; onRevision: (revision: number | null) => void }) {
   const { geometry, source } = graph.snapshot;
   const [workspace, setWorkspace] = useState<"atlas" | "schema">("atlas");
   const [selection, setSelection] = useState<EntitySelector>({ type: "page", pageNumber: 1 });
@@ -179,6 +183,11 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
         <button type="button" aria-pressed={workspace === "atlas"} onClick={() => setWorkspace("atlas")}>Page atlas</button>
         <button type="button" aria-pressed={workspace === "schema"} onClick={() => setWorkspace("schema")}>Schema flow</button>
       </nav>
+      <label className="revision-picker">Inspection revision <select aria-label="Inspection revision" value={viewRevision ?? "latest"}
+        onChange={event => onRevision(event.target.value === "latest" ? null : Number(event.target.value))}>
+        <option value="latest">Latest revision ({status.revision ?? "none"})</option>
+        {status.availableRevisions.map(revision => <option key={revision} value={revision}>Revision {revision}</option>)}
+      </select></label>
       <InspectionNotice status={status} />
       <Sidecars evidence={graph.sidecars} />
 
@@ -304,6 +313,9 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
         onSelectPage={selectPage}
         evidenceByte={evidenceLocus?.page.pageNumber === active.number ? evidenceLocus.range.pageOffset : null}
       />}
+      {active && selection.type === "cell" && <DeepCell key={`${graph.snapshot.id}:${selection.pageNumber}:${selection.cellIndex}`}
+        target={{ sessionId: status.sessionId, snapshotId: graph.snapshot.id, revision: graph.revision, pageNumber: selection.pageNumber, cellIndex: selection.cellIndex }}
+        currentRevision={status.revision} onPublished={onRevision} /> }
     </main>
   );
 }
@@ -344,6 +356,7 @@ function GeometryFact({ label, value }: { label: string; value: string }) {
 }
 
 export function App() {
+  const [viewRevision, setViewRevision] = useState<number | null>(null);
   const [graph, setGraph] = useState<InspectionGraph | null>(null);
   const [status, setStatus] = useState<SessionStatus | null>(null);
   const [evidence, setEvidence] = useState<Omit<InspectionGraph, "revision"> | null>(null);
@@ -362,8 +375,8 @@ export function App() {
         if (!response.ok) throw new Error(`Inspection request failed (${response.status})`);
         let next: SessionStatus = await response.json();
         if (next.state === "invalidated" || next.revision === null) cached = null;
-        else if (cached?.revision !== next.revision) {
-          const revision = await fetch(`${base}/revisions/${next.revision}`, { cache: "no-store", signal: abort.signal });
+        else if (cached?.revision !== (viewRevision ?? next.revision)) {
+          const revision = await fetch(`${base}/revisions/${viewRevision ?? next.revision}`, { cache: "no-store", signal: abort.signal });
           if (revision.status === 409) {
             next = await revision.json();
             cached = null;
@@ -402,11 +415,11 @@ export function App() {
     }
     void poll();
     return () => { abort.abort(); clearTimeout(timer); };
-  }, []);
+  }, [viewRevision]);
 
   if (error) return <main className="message"><h1>Page atlas unavailable</h1><p>{error}</p></main>;
   if (!status) return <main className="message"><h1>Opening inspection…</h1></main>;
-  if (graph) return <Atlas graph={graph} status={status} />;
+  if (graph) return <Atlas graph={graph} status={status} viewRevision={viewRevision} onRevision={setViewRevision} />;
   return <main className="workspace">
     <p className="eyebrow">Volmap SQLite Inspector</p>
     <h1>{status.source.displayName}</h1>

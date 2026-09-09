@@ -7,6 +7,11 @@ use serde::Serialize;
 use thiserror::Error;
 
 mod btree;
+mod deep;
+pub use deep::{
+    DeepBudget, DeepCoverage, DeepEvidence, DeepField, DeepResult, DeepSelector, DeepState,
+    DeepStatus, DeepValue, TypedValue,
+};
 mod pointer_map;
 mod roles;
 pub use pointer_map::{
@@ -31,7 +36,8 @@ pub use btree::{
     ByteRange, CellDetail, CellIdentity, Kind as BtreeKind, LocalCoverage, PageDetail, RecordState,
 };
 pub use session::{
-    Coverage, CoverageReason, InspectionSession, Progress, ScanControl, SessionState, SessionStatus,
+    Coverage, CoverageReason, DeepJob, DeepLimits, InspectionSession, Progress, ScanControl,
+    SessionState, SessionStatus,
 };
 pub use topology::{
     Containment, DiagnosticSeverity, EntityIdentity, PageIdentity, PhysicalEvidence, Relationship,
@@ -128,6 +134,7 @@ pub struct PageEntity {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectionGraph {
+    pub deep_inspections: Vec<DeepEvidence>,
     pub schema: SchemaEvidence,
     pub sidecars: Vec<SidecarEvidence>,
     pub revision: u64,

@@ -1,3 +1,6 @@
+mod deep;
+pub use deep::{DeepJob, DeepLimits};
+
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read};
 use std::os::unix::fs::MetadataExt;
@@ -72,6 +75,9 @@ pub struct Progress {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStatus {
+    pub deep_limits: DeepLimits,
+    pub session_id: String,
+    pub available_revisions: Vec<u64>,
     pub snapshot_id: String,
     pub source: SourceIdentity,
     pub state: SessionState,
@@ -340,6 +346,7 @@ struct SessionData {
     snapshot: Option<DatabaseSnapshot>,
     pages: Arc<Vec<PageEntity>>,
     published: Option<Arc<InspectionGraph>>,
+    revisions: std::collections::BTreeMap<u64, Arc<InspectionGraph>>,
     traversal_budget: super::TraversalBudget,
     sidecar_budget: super::SidecarBudget,
     schema_budget: super::SchemaBudget,
@@ -407,6 +414,7 @@ impl SessionData {
                 page.classification = classification;
             }
             self.published = Some(Arc::new(InspectionGraph {
+                deep_inspections: vec![],
                 schema,
                 sidecars: self.sidecars.clone(),
                 revision: 1,
@@ -423,6 +431,8 @@ impl SessionData {
                     .pointer_map
                     .unwrap_or_else(|| super::PointerMapEvidence::header(&snapshot.geometry)),
             }));
+            self.revisions
+                .insert(1, Arc::clone(self.published.as_ref().unwrap()));
             self.status.revision = Some(1);
         }
         self.status.coverage = Some(coverage);
@@ -432,6 +442,8 @@ impl SessionData {
 
 /// Owns accepted input handles and publishes only immutable, validated revisions.
 pub struct InspectionSession {
+    deep_limits: DeepLimits,
+    deep_jobs: Mutex<std::collections::BTreeMap<String, Arc<DeepJob>>>,
     data: Mutex<SessionData>,
     active_checks: AtomicUsize,
     cancel_verification: AtomicBool,
@@ -504,11 +516,16 @@ impl InspectionSession {
             .map(AcceptedInput::sidecar_evidence)
             .collect();
         Ok(Self {
+            deep_limits: DeepLimits::default(),
+            deep_jobs: Mutex::new(std::collections::BTreeMap::new()),
             active_checks: AtomicUsize::new(0),
             cancel_verification: AtomicBool::new(false),
             data: Mutex::new(SessionData {
                 inputs,
                 status: SessionStatus {
+                    deep_limits: DeepLimits::default(),
+                    session_id: Uuid::new_v4().to_string(),
+                    available_revisions: vec![],
                     snapshot_id: Uuid::new_v4().to_string(),
                     source: SourceIdentity {
                         id: Uuid::new_v4().to_string(),
@@ -531,6 +548,7 @@ impl InspectionSession {
                 snapshot: None,
                 pages: Arc::new(Vec::new()),
                 published: None,
+                revisions: std::collections::BTreeMap::new(),
                 traversal_budget,
                 sidecar_budget,
                 schema_budget,
@@ -745,6 +763,7 @@ impl InspectionSession {
         let mut data = self.lock();
         data.validate();
         let mut status = data.status.clone();
+        status.available_revisions = data.revisions.keys().copied().collect();
         status.progress.verifying = self.active_checks.load(Ordering::Acquire) > 0;
         status.progress.building_topology = data.topology_active;
         status
@@ -930,7 +949,7 @@ impl InspectionSession {
             if !d.validate() {
                 return Err(InspectionError::Invalidated);
             }
-            if d.published.as_ref().is_none_or(|r| r.revision != revision) {
+            if !d.revisions.contains_key(&revision) {
                 return Err(InspectionError::RevisionUnavailable);
             }
         }
@@ -939,9 +958,8 @@ impl InspectionSession {
         if !d.validate() {
             return Err(InspectionError::Invalidated);
         }
-        d.published
-            .as_ref()
-            .filter(|r| r.revision == revision)
+        d.revisions
+            .get(&revision)
             .cloned()
             .ok_or(InspectionError::RevisionUnavailable)
     }

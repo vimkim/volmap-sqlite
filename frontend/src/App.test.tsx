@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, type InspectionGraph, type SessionStatus } from "./App";
 
 const graph: InspectionGraph = {
+  deepInspections: [],
   revision: 1,
   sidecars: [],
   schema: { state: "complete", objects: [], diagnostics: [], maxDecodedBytes: "16777216", decodedBytes: "0", stoppingCell: null },
@@ -77,6 +78,7 @@ const graph: InspectionGraph = {
 };
 
 const published: SessionStatus = {
+  sessionId: "session-fixture", availableRevisions: [1],
   snapshotId: "snapshot-fixture", source: graph.snapshot.source, state: "published",
   progress: { unit: "pages", completed: 3, total: 3, verifying: false, buildingTopology: false, buildingSidecars: false, buildingSchema: false }, revision: 1, coverage: graph.coverage, diagnostic: null,
 };
@@ -403,5 +405,65 @@ it("shows all attribution and distinguishes rootless objects from invalid claims
   fireEvent.click(screen.getByRole("button", { name: "Page atlas" }));
   fireEvent.click(container.querySelector('[data-page-number="3"]')!);
   expect(screen.getByText("No validated schema attribution for this page.")).toBeTruthy();
+  cleanup(); vi.unstubAllGlobals();
+});
+
+it("deep-inspects only the selected cell and removes values when the selection changes", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  let finished = false;
+  const target = { sessionId: "session-fixture", snapshotId: "snapshot-fixture", revision: 1, pageNumber: 2, cellIndex: 0 };
+  const coverage = { phase: "payload", reason: "pending", payloadBytes: "30", reconstructedBytes: "0", remainderBytes: "30", decodedValues: 0, expectedValues: 1, evidence: [], overflowPages: [], stoppingPage: 2, stoppingPayloadOffset: "0" };
+  const receipt = () => ({ id: "job-one", target, state: finished ? "completed" : "pending", budget: { maxPayloadBytes: 16777216, maxOverflowPages: 32768, maxValues: 4096 }, coverage, resultRevision: finished ? 2 : null });
+  const fetcher = vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: () => Promise.resolve(
+    url.endsWith("/result") ? { target, revision: 2, evidence: { cell: { pageNumber: 2, index: 0 }, coverage, fields: [], columnMetadata: "unavailable" }, values: [{ field: { ordinal: 0, serialType: "57", payloadOffset: "2", byteLength: "22", source: [], columnName: null }, value: { type: "text", value: "SELECTED_PRIVATE_VALUE" } }] }
+      : url.includes("deep-inspections") ? receipt()
+      : url.includes("/revisions/") ? { ...graph, revision: Number(url.split("/").at(-1)), deepInspections: [] }
+      : { ...published, sessionId: "session-fixture", availableRevisions: finished ? [1, 2] : [1], revision: finished ? 2 : 1 }
+  ) }));
+  vi.stubGlobal("fetch", fetcher);
+  const { container } = render(<App />);
+  await screen.findByRole("heading", { name: "Page atlas" });
+  fireEvent.click(container.querySelector('[data-page-number="2"]')!);
+  fireEvent.click(screen.getByRole("button", { name: "Select cell 2:0" }));
+  expect(fetcher.mock.calls.some(call => String(call[0]).includes("deep-inspections"))).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Deep-inspect selected cell" }));
+  expect(await screen.findByText("Deep inspection: pending")).toBeTruthy();
+  const request = fetcher.mock.calls.find(call => String(call[0]).endsWith("/deep-inspections"));
+  expect(JSON.parse(request![1].body).target).toEqual(target);
+  expect(screen.queryByText("SELECTED_PRIVATE_VALUE")).toBeNull();
+  finished = true;
+  expect(await screen.findByText("SELECTED_PRIVATE_VALUE")).toBeTruthy();
+  expect(screen.getByRole("combobox", { name: "Inspection revision" })).toBeTruthy();
+  fireEvent.click(container.querySelector('[data-page-number="3"]')!);
+  expect(screen.queryByText("SELECTED_PRIVATE_VALUE")).toBeNull();
+  fetcher.mockClear();
+  fireEvent.change(screen.getByRole("combobox", { name: "Inspection revision" }), { target: { value: "1" } });
+  await waitFor(() => expect(fetcher.mock.calls.some(call => String(call[0]).endsWith("/revisions/1"))).toBe(true));
+  cleanup(); vi.unstubAllGlobals();
+});
+
+it("cancels a pending selected-cell job without fetching values", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  let cancelled = false;
+  const target = { sessionId: "session-fixture", snapshotId: "snapshot-fixture", revision: 1, pageNumber: 2, cellIndex: 0 };
+  const fetcher = vi.fn().mockImplementation((url: string) => {
+    if (url.endsWith("/cancel")) cancelled = true;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve(
+      url.includes("deep-inspections") ? { id: "cancel-job", target, state: cancelled ? "cancelled" : "pending", resultRevision: null,
+        coverage: { phase: "payload", reason: cancelled ? "cancelled" : "pending", payloadBytes: "30", reconstructedBytes: "10", remainderBytes: "20",
+          decodedValues: 0, expectedValues: null, stoppingPage: 2, stoppingPayloadOffset: "10", evidence: [], overflowPages: [] } }
+      : url.includes("/revisions/") ? graph : published
+    ) });
+  });
+  vi.stubGlobal("fetch", fetcher);
+  const { container } = render(<App />);
+  await screen.findByRole("heading", { name: "Page atlas" });
+  fireEvent.click(container.querySelector('[data-page-number="2"]')!);
+  fireEvent.click(screen.getByRole("button", { name: "Select cell 2:0" }));
+  fireEvent.click(screen.getByRole("button", { name: "Deep-inspect selected cell" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Cancel deep inspection" }));
+  expect(await screen.findByText("Deep inspection: cancelled")).toBeTruthy();
+  expect(fetcher.mock.calls.some(call => String(call[0]).endsWith("/result"))).toBe(false);
+  expect(screen.queryByRole("region", { name: "Selected stored values" })).toBeNull();
   cleanup(); vi.unstubAllGlobals();
 });

@@ -42,7 +42,7 @@ Supply a stopped database or stable copy. Sidecar bytes are never applied.
 The browser API separates session status from immutable revisions:
 
 - `GET /api/snapshots/{snapshot_id}`: progress, state, coverage and diagnostics.
-- `GET /api/snapshots/{snapshot_id}/revisions/1`: the published graph; unavailable
+- `GET /api/snapshots/{snapshot_id}/revisions/{revision}`: a retained immutable graph; unavailable
   during scanning and rejected with HTTP 409 after invalidation.
 - `GET /api/snapshots/{snapshot_id}/evidence`: retained invalidated observations,
   without a revision identity.
@@ -129,7 +129,7 @@ Choose a schema object to open the dedicated Schema flow workspace, then follow
 its root, descendant pages, and cells. Page atlas and Schema flow share page/cell
 selectors and selection; the physical evidence panel lists every validated schema
 attribution for its page. Declarations render as text. Cell selection here exposes
-structural evidence only; typed application-value inspection remains separate work.
+structural evidence until an explicit deep-inspection request.
 
 `--max-schema-bytes` caps aggregate schema-record payload bytes charged for decoding
 (default 16 MiB; zero disables decoding). The graph exposes that ceiling, charged
@@ -138,3 +138,35 @@ Schema attribution also respects the configured B-tree and overflow traversal
 limits. A malformed or incomplete schema does not invalidate independently valid
 physical evidence. This is a direct storage projection, not full SQL semantic
 validation or the optional semantic-enrichment helper.
+
+Select a physical cell and choose **Deep-inspect selected cell** to reconstruct its
+validated payload and decode stored NULL, integer, real, text, or BLOB values.
+Text uses the database encoding; BLOBs expose only type and byte length. Column
+metadata is currently unavailable, and rowid aliases are not substituted.
+The request captures the session, snapshot, base revision, page, and cell index.
+It runs asynchronously with configurable payload-byte, overflow-page, and value-count
+limits. Cancellation, malformed records, stopped overflow prefixes, stale revisions,
+and changed inputs withhold values and preserve the previous revision.
+
+A successful job publishes the next immutable revision. The revision picker retains
+older graphs. Broad graphs and job receipts contain structural provenance and coverage,
+never decoded application values. Values are held privately by the job and returned
+only through its exact-selector result request; changing the selected cell hides them.
+
+- `POST /api/snapshots/{snapshot_id}/deep-inspections`: start with `{target, budget}`.
+- `GET /api/snapshots/{snapshot_id}/deep-inspections/{job_id}`: structural progress/outcome.
+- `POST /api/snapshots/{snapshot_id}/deep-inspections/{job_id}/cancel`: cancel one job.
+- `POST /api/snapshots/{snapshot_id}/deep-inspections/{job_id}/result`: supply the
+  original selector as the body to retrieve the completed scoped result.
+
+Default deep limits are 16 MiB of payload, 32,768 overflow pages, and 4,096 values.
+Reconstruction follows the initial graph's validated prefix and cannot extend its
+coverage. Frozen-input fingerprint checks still cover the captured input files.
+
+Session admission defaults to 64 retained jobs and four concurrent workers, with
+the default per-job limits also acting as ceilings. `InspectionSession::with_deep_limits`
+configures these before sharing a session; status exposes the effective limits.
+Requests exceeding them receive a terminal budget-stopped receipt and are not retained.
+Invalid targets consume no admission slot. Accepted jobs and old revisions remain
+available for the session lifetime. Revision preparation currently copies the graph
+outside publication locks; cancellation prevents publication after preparation.

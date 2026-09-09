@@ -139,3 +139,13 @@ h2 { font-size: 20px; }
 .schema-descendants li { margin-bottom: .6rem; }
 .schema-flow h2, .evidence-panel li { overflow-wrap: anywhere; }
 .page-detail tr[aria-selected="true"] { background: #204136; }
+
+.deep-cell { margin-top: 1rem; padding: 1.25rem; border: 1px solid #70d5c1; border-radius: .5rem; background: #19232a; min-width: 0; }
+.deep-cell label { display: inline-flex; gap: .5rem; margin: .5rem; align-items: center; }
+.deep-cell input { width: 10rem; }
+.deep-cell button { margin: .5rem .5rem .5rem 0; }
+.deep-cell table { width: 100%; text-align: left; table-layout: fixed; border-collapse: collapse; }
+.deep-cell td, .deep-cell th { padding: .5rem; border-bottom: 1px solid #59616b; overflow-wrap: anywhere; vertical-align: top; }
+.stored-value { white-space: pre-wrap; }
+.deep-coverage { color: #c7ced6; }
+.revision-picker { display: flex; gap: .75rem; margin: 1rem 0; }

@@ -7,7 +7,9 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
-use crate::inspection::{InspectionError, InspectionSession, ScanControl};
+use crate::inspection::{
+    DeepBudget, DeepSelector, DeepState, InspectionError, InspectionSession, ScanControl,
+};
 
 const APP_JAVASCRIPT: &str = include_str!("../frontend/dist/assets/app.js");
 const APP_STYLESHEET: &str = include_str!("../frontend/dist/assets/app.css");
@@ -23,6 +25,22 @@ pub fn atlas_router(session: Arc<InspectionSession>) -> Router {
         )
         .route("/api/snapshots/{snapshot_id}/evidence", get(evidence))
         .route("/api/snapshots/{snapshot_id}/cancel", post(cancel))
+        .route(
+            "/api/snapshots/{snapshot_id}/deep-inspections",
+            post(start_deep),
+        )
+        .route(
+            "/api/snapshots/{snapshot_id}/deep-inspections/{job_id}",
+            get(deep_status),
+        )
+        .route(
+            "/api/snapshots/{snapshot_id}/deep-inspections/{job_id}/cancel",
+            post(cancel_deep),
+        )
+        .route(
+            "/api/snapshots/{snapshot_id}/deep-inspections/{job_id}/result",
+            post(deep_result),
+        )
         .route("/assets/app.js", get(javascript))
         .route("/assets/app.css", get(stylesheet))
         .layer(axum::middleware::map_response(
@@ -112,4 +130,75 @@ async fn stylesheet() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
         APP_STYLESHEET,
     )
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeepRequest {
+    target: DeepSelector,
+    #[serde(default)]
+    budget: DeepBudget,
+}
+
+async fn start_deep(
+    Path(id): Path<String>,
+    State(session): State<Arc<InspectionSession>>,
+    Json(request): Json<DeepRequest>,
+) -> Response {
+    if id != session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let status = session
+        .request_deep(request.target, request.budget)
+        .status();
+    (StatusCode::ACCEPTED, Json(status)).into_response()
+}
+
+async fn deep_status(
+    Path((id, job)): Path<(String, String)>,
+    State(session): State<Arc<InspectionSession>>,
+) -> Response {
+    if id != session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    session.deep_status(&job).map_or_else(
+        || StatusCode::NOT_FOUND.into_response(),
+        |status| Json(status).into_response(),
+    )
+}
+
+async fn cancel_deep(
+    Path((id, job)): Path<(String, String)>,
+    State(session): State<Arc<InspectionSession>>,
+) -> Response {
+    if id != session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    session.cancel_deep(&job).map_or_else(
+        || StatusCode::NOT_FOUND.into_response(),
+        |status| Json(status).into_response(),
+    )
+}
+
+async fn deep_result(
+    Path((id, job)): Path<(String, String)>,
+    State(session): State<Arc<InspectionSession>>,
+    Json(target): Json<DeepSelector>,
+) -> Response {
+    if id != session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match tokio::task::spawn_blocking(move || session.deep_result(&job, &target)).await {
+        Ok(Ok(result)) => Json(result).into_response(),
+        Ok(Err(state)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"state": state})),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"state": DeepState::Failed})),
+        )
+            .into_response(),
+    }
 }

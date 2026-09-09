@@ -203,3 +203,73 @@ async fn cancellation_publishes_an_explicit_partial_revision() {
     assert!(graph.contains("\"nextPage\":2"));
     assert!(!graph.contains("\"number\":2"));
 }
+
+#[tokio::test]
+async fn deep_values_require_the_exact_posted_selector_and_never_enter_broad_routes() {
+    use volmap_sqlite::inspection::{DeepBudget, DeepSelector, DeepState};
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("selected.sqlite");
+    write_fixture(&path);
+    let session = Arc::new(InspectionSession::open(&path).unwrap());
+    let status = session.status();
+    let target = DeepSelector {
+        session_id: status.session_id,
+        snapshot_id: status.snapshot_id.clone(),
+        revision: 1,
+        page_number: 2,
+        cell_index: 0,
+    };
+    let job = session.request_deep(target.clone(), DeepBudget::default());
+    let waiting = Arc::clone(&job);
+    assert_eq!(
+        tokio::task::spawn_blocking(move || waiting.wait())
+            .await
+            .unwrap()
+            .state,
+        DeepState::Completed
+    );
+    let app = atlas_router(session);
+    let base = format!("/api/snapshots/{}", status.snapshot_id);
+    for route in [
+        base.clone(),
+        format!("{base}/revisions/1"),
+        format!("{base}/revisions/2"),
+        format!("{base}/deep-inspections/{}", job.id),
+        format!("{base}/evidence"),
+    ] {
+        let response = get(app.clone(), &route).await;
+        assert!(!response_body(response).await.contains("fixture-value"));
+    }
+    let result_url = format!("{base}/deep-inspections/{}/result", job.id);
+    for exact in [false, true] {
+        let mut selector = target.clone();
+        if !exact {
+            selector.cell_index = 1;
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&result_url)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&selector).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.status(),
+            if exact {
+                StatusCode::OK
+            } else {
+                StatusCode::CONFLICT
+            }
+        );
+        assert_eq!(
+            response_body(response).await.contains("fixture-value"),
+            exact
+        );
+    }
+}

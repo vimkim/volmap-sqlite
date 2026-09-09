@@ -482,7 +482,11 @@ fn record(bytes: &[u8], geometry: &DatabaseGeometry) -> Result<Record, &'static 
         if serial < 13 || serial % 2 == 0 {
             return Err("schema_record_invalid");
         }
-        decode_text(bytes, geometry.text_encoding)
+        let text = decode_text(bytes, geometry.text_encoding)?;
+        if text.contains('\0') {
+            return Err("schema_text_invalid");
+        }
+        Ok(text)
     };
     let kind = match text(0)?.as_str() {
         "table" => SchemaObjectType::Table,
@@ -525,7 +529,7 @@ fn record(bytes: &[u8], geometry: &DatabaseGeometry) -> Result<Record, &'static 
     })
 }
 
-fn decode_text(bytes: &[u8], encoding: TextEncoding) -> Result<String, &'static str> {
+pub(super) fn decode_text(bytes: &[u8], encoding: TextEncoding) -> Result<String, &'static str> {
     let text = match encoding {
         TextEncoding::Utf8 => {
             String::from_utf8(bytes.to_vec()).map_err(|_| "schema_text_invalid")?
@@ -548,9 +552,6 @@ fn decode_text(bytes: &[u8], encoding: TextEncoding) -> Result<String, &'static 
             String::from_utf16(&words).map_err(|_| "schema_text_invalid")?
         }
     };
-    if text.contains('\0') {
-        return Err("schema_text_invalid");
-    }
     Ok(text)
 }
 

@@ -10,6 +10,7 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
     ok: true,
     json: () => Promise.resolve(url.endsWith("/revisions/1") ? {
       revision: 1,
+      deepInspections: [],
       sidecars: [],
   schema: { state: "complete", objects: [{ identity: { pageNumber: 1, index: 0 }, evidence: [], objectType: "view", name: "declared_view", tableName: "declared_view", rootPage: "0", root: null, pages: [], declaration: "CREATE VIEW declared_view AS SELECT absent_function()", state: "declaration_only", diagnostics: [] }], diagnostics: [], maxDecodedBytes: "16777216", decodedBytes: "0", stoppingCell: null },
       pointerMap: { diagnostics: [], applicable: false, complete: true, largestRoot: { value: 0 }, incrementalVacuum: { value: 0 }, locations: [], layout: null, lockBytePage: null, pages: [] },
@@ -33,6 +34,7 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
         traversalBudget: { maxBtreePages: 1000, maxOverflowPages: 1000, maxTotalPages: "10000" },
       },
     } : {
+      sessionId: "embedded-session", availableRevisions: [1],
       snapshotId: "embedded-snapshot", source: { id: "embedded-source", displayName: "embedded.sqlite" },
       state: "published", revision: 1, progress: { unit: "pages", completed: 2, total: 2 },
       coverage: { scope: "page_inventory", evaluated: 2, total: 2, nextPage: null, reason: "complete", remainder: 0 },
