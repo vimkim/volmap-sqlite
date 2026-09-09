@@ -56,6 +56,8 @@ pub struct Coverage {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+// These activity flags overlap (verification and schema/sidecar work can run during topology publication).
+#[allow(clippy::struct_excessive_bools)]
 pub struct Progress {
     pub unit: &'static str,
     pub completed: u32,
@@ -63,6 +65,8 @@ pub struct Progress {
     pub verifying: bool,
     pub building_topology: bool,
     pub building_sidecars: bool,
+    #[serde(rename = "buildingSchema")]
+    pub building_schema: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -338,6 +342,7 @@ struct SessionData {
     published: Option<Arc<InspectionGraph>>,
     traversal_budget: super::TraversalBudget,
     sidecar_budget: super::SidecarBudget,
+    schema_budget: super::SchemaBudget,
     topology_active: bool,
     topology_cancellation: Arc<super::topology::WorkControl>,
     pending_topology_stop: Option<(SessionState, CoverageReason)>,
@@ -388,6 +393,7 @@ impl SessionData {
         state: SessionState,
         reason: CoverageReason,
         mut topology: super::topology::Topology,
+        schema: super::SchemaEvidence,
     ) {
         let coverage = self.coverage(reason);
         if let Some(snapshot) = &self.snapshot {
@@ -401,6 +407,7 @@ impl SessionData {
                 page.classification = classification;
             }
             self.published = Some(Arc::new(InspectionGraph {
+                schema,
                 sidecars: self.sidecars.clone(),
                 revision: 1,
                 coverage: coverage.clone(),
@@ -472,6 +479,23 @@ impl InspectionSession {
         traversal_budget: super::TraversalBudget,
         sidecar_budget: super::SidecarBudget,
     ) -> Result<Self, InspectionError> {
+        Self::begin_with_schema_budget(
+            path,
+            traversal_budget,
+            sidecar_budget,
+            super::SchemaBudget::default(),
+        )
+    }
+
+    /// Accepts frozen inputs with explicit traversal, sidecar and schema decode ceilings.
+    /// # Errors
+    /// Returns input-access or invalidation errors during acceptance.
+    pub fn begin_with_schema_budget(
+        path: &Path,
+        traversal_budget: super::TraversalBudget,
+        sidecar_budget: super::SidecarBudget,
+        schema_budget: super::SchemaBudget,
+    ) -> Result<Self, InspectionError> {
         let inputs = Arc::new(Inputs::accept(path)?);
         let sidecars = inputs
             .accepted
@@ -498,6 +522,7 @@ impl InspectionSession {
                         verifying: false,
                         building_topology: false,
                         building_sidecars: false,
+                        building_schema: false,
                     },
                     revision: None,
                     coverage: None,
@@ -508,6 +533,7 @@ impl InspectionSession {
                 published: None,
                 traversal_budget,
                 sidecar_budget,
+                schema_budget,
                 topology_active: false,
                 topology_cancellation: Arc::new(super::topology::WorkControl::new()),
                 pending_topology_stop: None,
@@ -608,36 +634,33 @@ impl InspectionSession {
                 )
             },
         );
-        let sidecar_budget = {
-            let mut d = self.lock();
-            d.status.progress.building_sidecars = true;
-            d.sidecar_budget
+        let schema_budget = {
+            let mut data = self.lock();
+            data.status.progress.building_schema = true;
+            data.schema_budget
         };
-        let sidecars = inputs
-            .accepted
-            .iter()
-            .skip(1)
-            .map(|input| {
-                let evidence = input.sidecar_evidence();
-                if reason != CoverageReason::Complete || cancellation.traversal_reason().is_some() {
-                    evidence
-                } else {
-                    super::sidecar::inspect(
-                        &input.path,
-                        evidence,
-                        snapshot.as_ref().map_or(0, |s| s.geometry.page_size),
-                        &cancellation,
-                        &mut checkpoint,
-                        sidecar_budget,
-                    )
-                }
-            })
-            .collect();
-        {
-            let mut d = self.lock();
-            d.sidecars = sidecars;
-            d.status.progress.building_sidecars = false;
-        }
+        let schema = snapshot.as_ref().map_or_else(
+            || super::SchemaEvidence::unavailable(schema_budget),
+            |snapshot| {
+                super::schema::inspect(
+                    &inputs.file,
+                    &snapshot.geometry,
+                    &pages,
+                    &topology,
+                    &cancellation,
+                    schema_budget,
+                    &mut checkpoint,
+                )
+            },
+        );
+        self.lock().status.progress.building_schema = false;
+        self.inspect_sidecars(
+            &inputs,
+            snapshot.as_ref().map_or(0, |s| s.geometry.page_size),
+            reason,
+            &cancellation,
+            &mut checkpoint,
+        );
         drop(pages);
         let (publish_state, publish_reason, pending_stop) = {
             let mut d = self.lock();
@@ -672,8 +695,48 @@ impl InspectionSession {
         {
             return Err(InspectionError::NotScanning);
         }
-        d.publish(publish_state, publish_reason, topology);
+        d.publish(publish_state, publish_reason, topology, schema);
         Ok(())
+    }
+
+    fn inspect_sidecars(
+        &self,
+        inputs: &Inputs,
+        page_size: u32,
+        reason: CoverageReason,
+        cancellation: &super::topology::WorkControl,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let sidecar_budget = {
+            let mut d = self.lock();
+            d.status.progress.building_sidecars = true;
+            d.sidecar_budget
+        };
+        let sidecars = inputs
+            .accepted
+            .iter()
+            .skip(1)
+            .map(|input| {
+                let evidence = input.sidecar_evidence();
+                if reason != CoverageReason::Complete || cancellation.traversal_reason().is_some() {
+                    evidence
+                } else {
+                    super::sidecar::inspect(
+                        &input.path,
+                        evidence,
+                        page_size,
+                        cancellation,
+                        checkpoint,
+                        sidecar_budget,
+                    )
+                }
+            })
+            .collect();
+        {
+            let mut d = self.lock();
+            d.sidecars = sidecars;
+            d.status.progress.building_sidecars = false;
+        }
     }
 
     /// Observes progress independently of a navigable graph and rechecks accepted inputs.

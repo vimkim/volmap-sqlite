@@ -9,10 +9,13 @@ import { PointerMap, type PointerMapEvidence } from "./PointerMap";
 import { Sidecars, type SidecarEvidence } from "./Sidecars";
 import { Freelist, type FreelistEvidence } from "./Freelist";
 
+import { SchemaFlow, SchemaObjects, schemaSelector, selectorKey, type EntitySelector, type SchemaEvidence } from "./SchemaFlow";
+
 type TextEncoding = "utf8" | "utf16_le" | "utf16_be";
 type TopologyPhase = "pointer_map_validation" | "pointer_map_reconciliation" | "pointer_map_inspection" | "role_reconciliation" | "allocation_reconciliation" | "freelist_inspection" | "btree_claim_collection" | "btree_claim_validation" | "btree_parent_reconciliation" | "btree_cycle_reconciliation" | "btree_relationship_normalization" | "btree_traversal" | "overflow_inspection" | "overflow_reconciliation" | "overflow_relationship_normalization" | "complete";
 
 export interface InspectionGraph {
+  schema: SchemaEvidence;
   sidecars: SidecarEvidence[];
   revision: number;
   freelist: FreelistEvidence;
@@ -68,7 +71,7 @@ export interface SessionStatus {
   snapshotId: string;
   source: { id: string; displayName: string };
   state: "scanning" | "published" | "cancelled" | "stopped" | "invalidated" | "fatal";
-  progress: { unit: "pages"; completed: number; total: number | null; verifying: boolean; buildingTopology: boolean; buildingSidecars: boolean };
+  progress: { unit: "pages"; completed: number; total: number | null; verifying: boolean; buildingTopology: boolean; buildingSidecars: boolean; buildingSchema: boolean };
   revision: number | null;
   coverage: Coverage | null;
   diagnostic: { code: string; message: string; affectedInputs: string[] } | null;
@@ -88,7 +91,10 @@ const encodingLabel: Record<TextEncoding, string> = {
 
 function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatus }) {
   const { geometry, source } = graph.snapshot;
-  const [selectedPage, setSelectedPage] = useState(1);
+  const [workspace, setWorkspace] = useState<"atlas" | "schema">("atlas");
+  const [selection, setSelection] = useState<EntitySelector>({ type: "page", pageNumber: 1 });
+  const [selectedSchema, setSelectedSchema] = useState<string | null>(null);
+  const selectedPage = selection.pageNumber;
   const [evidenceLocus, setEvidenceLocus] = useState<PhysicalEvidence | null>(null);
   const projection = useMemo(() => {
     const pagesByNumber = new Map(graph.pages.map(page => [page.number, page]));
@@ -136,17 +142,32 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
   const firstFreelistLink = graph.relationships.find(relationship =>
     relationship.kind === "freelist_trunk" && relationship.source.pageNumber === 1);
   const activeTrunk = graph.freelist.trunks.find(trunk => trunk.page.pageNumber === selectedPage);
-  const selectPage = (page: number) => {
-    setSelectedPage(page);
+  const selectEntity = (selector: EntitySelector) => {
+    if (selector.type === "schema") {
+      const object = graph.schema.objects.find(object => selectorKey(schemaSelector(object)) === selectorKey(selector));
+      if (!object) return;
+      setSelectedSchema(selectorKey(selector));
+      setWorkspace("schema");
+      if (object.root && projection.pagesByNumber.has(object.root.pageNumber)) {
+        setSelection({ type: "page", pageNumber: object.root.pageNumber });
+      }
+    } else {
+      const page = projection.pagesByNumber.get(selector.pageNumber);
+      if (!page || (selector.type === "cell" && !page.detail.cells.some(cell => cell.identity.index === selector.cellIndex))) return;
+      setSelection(selector);
+    }
     setEvidenceLocus(null);
   };
+  const selectPage = (page: number) => selectEntity({ type: "page", pageNumber: page });
+  const activeSchema = graph.schema.objects.find(object => selectorKey(schemaSelector(object)) === selectedSchema);
+  const attribution = graph.schema.objects.filter(object => object.pages.some(page => page.pageNumber === selectedPage));
 
   return (
     <main className="workspace">
       <header className="topbar">
         <div>
           <p className="eyebrow">Volmap SQLite Inspector</p>
-          <h1>Page atlas</h1>
+          <h1>{workspace === "atlas" ? "Page atlas" : "Schema flow"}</h1>
         </div>
         <div className="source-badge">
           <span className="status-dot" />
@@ -154,6 +175,10 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
         </div>
       </header>
 
+      <nav className="workspace-tabs" aria-label="Inspection workspace">
+        <button type="button" aria-pressed={workspace === "atlas"} onClick={() => setWorkspace("atlas")}>Page atlas</button>
+        <button type="button" aria-pressed={workspace === "schema"} onClick={() => setWorkspace("schema")}>Schema flow</button>
+      </nav>
       <InspectionNotice status={status} />
       <Sidecars evidence={graph.sidecars} />
 
@@ -177,11 +202,12 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
         <GeometryFact label="Aggregate traversal limit" value={BigInt(graph.topologyCoverage.traversalBudget.maxTotalPages).toLocaleString()} />
       </section>
 
-      <Freelist evidence={graph.freelist} prefix={freelistTraversal?.validatedPrefix ?? []}
+      {workspace === "atlas" && <><Freelist evidence={graph.freelist} prefix={freelistTraversal?.validatedPrefix ?? []}
         firstNavigable={firstFreelistLink?.target.pageNumber ?? null} onSelectPage={selectPage} />
-      <PointerMap evidence={graph.pointerMap} selectedPage={selectedPage} availablePages={projection.pagesByNumber} onSelectPage={selectPage} />
+      <PointerMap evidence={graph.pointerMap} selectedPage={selectedPage} availablePages={projection.pagesByNumber} onSelectPage={selectPage} /></>}
+      <SchemaObjects evidence={graph.schema} selected={selectedSchema} onSelect={selectEntity} />
       <div className="content-grid">
-        <section className="atlas-panel">
+        {workspace === "schema" ? <SchemaFlow graph={graph} object={activeSchema} selection={selection} onSelect={selectEntity} /> : <section className="atlas-panel">
           <div className="section-heading">
             <div>
               <p className="eyebrow">Physical projection</p>
@@ -195,6 +221,7 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
               <button
                 className={page.number === selectedPage ? "page selected" : "page"}
                 data-page-number={page.number}
+                data-selector={selectorKey({ type: "page", pageNumber: page.number })}
                 data-role={page.classification.role}
                 data-finding={projection.findingsByPage.get(page.number) ?? "none"}
                 aria-pressed={page.number === selectedPage}
@@ -212,7 +239,7 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
               </button>
             ))}
           </div>
-        </section>
+        </section>}
 
         <aside className="evidence-panel">
           <p className="eyebrow">Selection-linked evidence</p>
@@ -225,6 +252,13 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
             <div><dt>Role claim</dt><dd>{active ? roleLabels[active.classification.role] : "Unknown"}</dd></div>
           </dl>
           </>}
+          <section aria-label="Schema attribution">
+            <h3>Schema attribution</h3>
+            {attribution.length ? <ul>{attribution.map(object => <li key={selectorKey(schemaSelector(object))}>
+              <button type="button" onClick={() => selectEntity(schemaSelector(object))}>{object.objectType} {object.name}</button>
+              {" · "}{object.state.replaceAll("_", " ")}
+            </li>)}</ul> : <p>No validated schema attribution for this page.</p>}
+          </section>
           <p className="evidence-note">
             Select a page to inspect its structural map and physical cell inventory below. Page roles reconcile physical evidence. Unknown pages retain opaque bytes; conflicts retain competing claims.
           </p>
@@ -241,7 +275,7 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
               type="button"
               aria-label={`Jump to page ${evidence.page.pageNumber} byte ${evidence.range.pageOffset}`}
               onClick={() => {
-                setSelectedPage(evidence.page.pageNumber);
+                selectPage(evidence.page.pageNumber);
                 setEvidenceLocus(evidence);
               }}
             >
@@ -257,9 +291,11 @@ function Atlas({ graph, status }: { graph: InspectionGraph; status: SessionStatu
         <p>Leaf-count evidence: page bytes [4, 8), main-file bytes [{activeTrunk.leafCount.evidence.range.fileOffset}, {activeTrunk.leafCount.evidence.range.fileOffset + 4}).</p>
       </section>}
       {active && <RoleClaims classification={active.classification} onEvidence={evidence => {
-        setSelectedPage(evidence.page.pageNumber); setEvidenceLocus(evidence);
+        selectPage(evidence.page.pageNumber); setEvidenceLocus(evidence);
       }} />}
       {active && <PageDetail
+        selectedCell={selection.type === "cell" ? selection.cellIndex : null}
+        onSelectCell={index => selectEntity({ type: "cell", pageNumber: active.number, cellIndex: index })}
         detail={active.detail}
         pageSize={geometry.pageSize}
         pageNumber={active.number}
@@ -288,8 +324,9 @@ function InspectionNotice({ status }: { status: SessionStatus }) {
     {status.state === "scanning" && <p>
       Page inventory: {progress.completed} / {progress.total ?? "unknown"} pages
       {progress.verifying && ". Verifying frozen inputs before publication."}
+      {progress.buildingSchema && ". Inspecting direct schema evidence."}
       {progress.buildingSidecars && ". Inspecting sidecar evidence."}
-      {progress.buildingTopology && !progress.buildingSidecars && ". Building bounded relationship topology."}
+      {progress.buildingTopology && !progress.buildingSidecars && !progress.buildingSchema && ". Building bounded relationship topology."}
     </p>}
     {coverage && <p>
       {coverage.reason === "complete" ? "Page inventory complete" : "Partial coverage"}: {coverage.evaluated} pages evaluated.

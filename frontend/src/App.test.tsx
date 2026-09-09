@@ -7,6 +7,7 @@ import { App, type InspectionGraph, type SessionStatus } from "./App";
 const graph: InspectionGraph = {
   revision: 1,
   sidecars: [],
+  schema: { state: "complete", objects: [], diagnostics: [], maxDecodedBytes: "16777216", decodedBytes: "0", stoppingCell: null },
   pointerMap: { diagnostics: [], applicable: false, complete: true, largestRoot: { value: 0, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 52, fileOffset: 52, length: 4 }, validationRule: "sqlite_header_largest_root" } }, incrementalVacuum: { value: 0, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 64, fileOffset: 64, length: 4 }, validationRule: "sqlite_header_incremental_vacuum" } }, locations: [], layout: null, lockBytePage: null, pages: [] },
   freelist: { firstTrunk: { value: 0, evidence: { page: { pageNumber: 1 }, range: { pageOffset: 32, fileOffset: 32, length: 4 }, validationRule: "sqlite_header_first_freelist_trunk" } }, declaredCount: null, trunks: [], coverage: { reason: "complete", stoppingClaim: null, evaluatedPages: 0, remainder: 0 } },
   coverage: { scope: "page_inventory", evaluated: 3, total: 3, nextPage: null, reason: "complete", remainder: 0 },
@@ -77,7 +78,7 @@ const graph: InspectionGraph = {
 
 const published: SessionStatus = {
   snapshotId: "snapshot-fixture", source: graph.snapshot.source, state: "published",
-  progress: { unit: "pages", completed: 3, total: 3, verifying: false, buildingTopology: false, buildingSidecars: false }, revision: 1, coverage: graph.coverage, diagnostic: null,
+  progress: { unit: "pages", completed: 3, total: 3, verifying: false, buildingTopology: false, buildingSidecars: false, buildingSchema: false }, revision: 1, coverage: graph.coverage, diagnostic: null,
 };
 
 function respond(status: () => SessionStatus) {
@@ -210,7 +211,7 @@ describe("page atlas", () => {
 
   it("shows progress without a mosaic, then adopts only the published revision", async () => {
     let status: SessionStatus = { ...published, state: "scanning", revision: null, coverage: null,
-      progress: { unit: "pages", completed: 1, total: 3, verifying: false, buildingTopology: false, buildingSidecars: false } };
+      progress: { unit: "pages", completed: 1, total: 3, verifying: false, buildingTopology: false, buildingSidecars: false, buildingSchema: false } };
     respond(() => status);
     const { container } = render(<App />);
     expect(await screen.findByRole("heading", { name: "Scanning" })).toBeTruthy();
@@ -343,5 +344,64 @@ it("marks finding pages across the mosaic, including claim targets away from dia
   for (const page of [1, 2, 3]) {
     expect(container.querySelector(`[data-page-number="${page}"]`)?.getAttribute("data-finding")).toBe("error");
   }
+  cleanup(); vi.unstubAllGlobals();
+});
+
+it("follows schema roots and descendants while preserving cell selection across workspaces", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  const attributed = structuredClone(graph);
+  attributed.relationships = [{ claimId: "child:2:3", kind: "btree_child", source: { type: "page", pageNumber: 2 }, target: { pageNumber: 3 } }];
+  Object.assign(attributed, { schema: { state: "complete", diagnostics: [], maxDecodedBytes: "10000", decodedBytes: "100", stoppingCell: null, objects: [
+    { identity: { pageNumber: 1, index: 0 }, evidence: [], objectType: "table", name: "items", tableName: "items", declaration: "CREATE TABLE items(value)", rootPage: "2", root: { pageNumber: 2 }, pages: [{ pageNumber: 2 }, { pageNumber: 3 }], state: "complete", diagnostics: [] },
+    { identity: { pageNumber: 1, index: 1 }, evidence: [], objectType: "view", name: "view_only", tableName: "view_only", declaration: "CREATE VIEW view_only AS SELECT absent_function()", rootPage: "0", root: null, pages: [], state: "declaration_only", diagnostics: [] },
+  ] } });
+  vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: () => Promise.resolve(url.endsWith("/revisions/1") ? attributed : published) })));
+  const { container } = render(<App />);
+  await screen.findByRole("heading", { name: "Page atlas" });
+  fireEvent.click(screen.getByRole("button", { name: "Inspect schema table items" }));
+  expect(screen.getByRole("heading", { name: "Schema flow" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Root B-tree page 2" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Descendant page 3 from page 2" }));
+  expect(screen.getByRole("heading", { name: "Page 3" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Select attributed cell 3:0" }));
+  fireEvent.click(screen.getByRole("button", { name: "Page atlas" }));
+  expect(screen.getByRole("status", { name: "Selected cell" }).textContent).toContain("cell:3:0");
+  expect(container.querySelector('[data-page-number="3"]')?.getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("region", { name: "Schema attribution" }).textContent).toContain("items");
+  fireEvent.click(screen.getByRole("button", { name: "Schema flow" }));
+  fireEvent.click(screen.getByRole("button", { name: "Inspect schema view view_only" }));
+  expect(screen.getByText("Declaration only — no directly attributable storage B-tree.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Root B-tree page/ })).toBeNull();
+  expect(screen.getByText("CREATE VIEW view_only AS SELECT absent_function()")).toBeTruthy();
+  cleanup(); vi.unstubAllGlobals();
+});
+
+it("shows all attribution and distinguishes rootless objects from invalid claims with duplicate names", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  const snapshot = structuredClone(graph);
+  snapshot.schema = { state: "partial", diagnostics: ["schema_btree_partial"], maxDecodedBytes: "1000", decodedBytes: "100", stoppingCell: null,
+    objects: [
+      { identity: { pageNumber: 1, index: 0 }, evidence: [], objectType: "table", name: "same", tableName: "same", declaration: "CREATE TABLE same(x)", rootPage: "2", root: { pageNumber: 2 }, pages: [{ pageNumber: 2 }], state: "partial", diagnostics: ["schema_attribution_partial"] },
+      { identity: { pageNumber: 1, index: 1 }, evidence: [], objectType: "index", name: "another", tableName: "same", declaration: null, rootPage: "2", root: { pageNumber: 2 }, pages: [{ pageNumber: 2 }], state: "complete", diagnostics: [] },
+      { identity: { pageNumber: 1, index: 2 }, evidence: [], objectType: "view", name: "same", tableName: "same", declaration: "CREATE VIEW same AS SELECT 1", rootPage: "0", root: null, pages: [], state: "declaration_only", diagnostics: [] },
+      { identity: { pageNumber: 1, index: 3 }, evidence: [], objectType: "table", name: "broken", tableName: "broken", declaration: "<script>fail()</script>", rootPage: "999", root: null, pages: [], state: "unavailable", diagnostics: ["schema_root_unavailable"] },
+    ] };
+  vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => Promise.resolve({ ok: true, json: () => Promise.resolve(url.endsWith("/revisions/1") ? snapshot : published) })));
+  const { container } = render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Inspect schema table same" }));
+  const attribution = screen.getByRole("region", { name: "Schema attribution" });
+  expect(attribution.textContent).toContain("table same");
+  expect(attribution.textContent).toContain("index another");
+  expect(screen.getByText("Partial attribution: only validated traversal prefixes are shown.")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Inspect schema view same" }));
+  expect(screen.getByRole("heading", { name: "Declaration only" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Inspect schema table broken" }));
+  expect(screen.getByRole("heading", { name: "Attribution unavailable" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Root B-tree page/ })).toBeNull();
+  expect(screen.getByText("<script>fail()</script>")).toBeTruthy();
+  expect(container.querySelector("script")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Page atlas" }));
+  fireEvent.click(container.querySelector('[data-page-number="3"]')!);
+  expect(screen.getByText("No validated schema attribution for this page.")).toBeTruthy();
   cleanup(); vi.unstubAllGlobals();
 });

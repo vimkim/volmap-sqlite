@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 use tokio::net::TcpListener;
-use volmap_sqlite::inspection::{InspectionSession, ScanControl, SidecarBudget, TraversalBudget};
+use volmap_sqlite::inspection::{
+    InspectionSession, ScanControl, SchemaBudget, SidecarBudget, TraversalBudget,
+};
 use volmap_sqlite::web::atlas_router;
 
 #[derive(Debug, Parser)]
@@ -35,12 +37,16 @@ struct Arguments {
     /// Maximum WAL frames retained as sidecar evidence (0 inspects only the header).
     #[arg(long, default_value_t = 100_000)]
     max_wal_frames: u64,
+
+    /// Maximum aggregate schema-record payload bytes decoded (0 disables schema decoding).
+    #[arg(long, default_value_t = 16 * 1024 * 1024)]
+    max_schema_bytes: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let arguments = Arguments::parse();
-    let session = Arc::new(InspectionSession::begin_with_budgets(
+    let session = Arc::new(InspectionSession::begin_with_schema_budget(
         &arguments.database,
         TraversalBudget::with_total_pages(
             arguments.max_btree_pages,
@@ -49,6 +55,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ),
         SidecarBudget {
             max_wal_frames: arguments.max_wal_frames,
+        },
+        SchemaBudget {
+            max_decoded_bytes: arguments.max_schema_bytes,
         },
     )?);
     let display_name = session.status().source.display_name;

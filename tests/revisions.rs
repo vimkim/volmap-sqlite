@@ -16,10 +16,19 @@ fn progress_is_deterministic_and_only_a_finished_revision_is_navigable() {
     assert_eq!(session.status().state, SessionState::Scanning);
     assert!(session.revision(1).is_err());
     let mut progress = Vec::new();
+    let mut reached_schema = false;
     session
         .scan(|status| {
             assert!(session.revision(1).is_err());
-            progress.push((status.progress.completed, status.progress.total));
+            if status.progress.building_schema {
+                reached_schema = true;
+                assert_eq!(
+                    (status.progress.completed, status.progress.total),
+                    (2, Some(2))
+                );
+            } else {
+                progress.push((status.progress.completed, status.progress.total));
+            }
             ScanControl::Continue
         })
         .unwrap();
@@ -33,6 +42,7 @@ fn progress_is_deterministic_and_only_a_finished_revision_is_navigable() {
             (2, Some(2))
         ]
     );
+    assert!(reached_schema);
     assert_eq!(session.status().state, SessionState::Published);
     let revision = session.revision(1).unwrap();
     assert_eq!(

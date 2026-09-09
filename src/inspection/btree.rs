@@ -539,7 +539,7 @@ fn dword(bytes: &[u8], offset: usize) -> u32 {
     )
 }
 
-fn varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, &'static str> {
+pub(super) fn varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, &'static str> {
     let mut value = 0_u64;
     for index in 0..9 {
         let byte = *bytes.get(*cursor).ok_or("truncated_varint")?;

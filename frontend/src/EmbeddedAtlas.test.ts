@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 
 it("boots the embedded production asset and renders its fetched page mosaic", async () => {
@@ -11,6 +11,7 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
     json: () => Promise.resolve(url.endsWith("/revisions/1") ? {
       revision: 1,
       sidecars: [],
+  schema: { state: "complete", objects: [{ identity: { pageNumber: 1, index: 0 }, evidence: [], objectType: "view", name: "declared_view", tableName: "declared_view", rootPage: "0", root: null, pages: [], declaration: "CREATE VIEW declared_view AS SELECT absent_function()", state: "declaration_only", diagnostics: [] }], diagnostics: [], maxDecodedBytes: "16777216", decodedBytes: "0", stoppingCell: null },
       pointerMap: { diagnostics: [], applicable: false, complete: true, largestRoot: { value: 0 }, incrementalVacuum: { value: 0 }, locations: [], layout: null, lockBytePage: null, pages: [] },
       freelist: { firstTrunk: null, declaredCount: null, trunks: [], coverage: { reason: "not_inspected", stoppingClaim: null, evaluatedPages: 0, remainder: null } },
       coverage: { scope: "page_inventory", evaluated: 2, total: 2, nextPage: null, reason: "complete", remainder: 0 },
@@ -45,5 +46,10 @@ it("boots the embedded production asset and renders its fetched page mosaic", as
 
   await waitFor(() => expect(screen.getByRole("heading", { name: "Page atlas" })).toBeTruthy());
   expect(document.querySelectorAll("[data-page-number]")).toHaveLength(2);
+  fireEvent.click(screen.getByRole("button", { name: "Inspect schema view declared_view" }));
+  expect(await screen.findByRole("heading", { name: "Schema flow" })).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Declaration only" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Page atlas" }));
+  await waitFor(() => expect(document.querySelectorAll("[data-page-number]")).toHaveLength(2));
   expect(fetch).toHaveBeenCalledWith("/api/snapshots/embedded-snapshot/revisions/1", expect.objectContaining({ cache: "no-store" }));
 });

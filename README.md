@@ -108,3 +108,33 @@ npm --prefix frontend test
 
 Session tests use public progress callbacks and channels to synchronize input changes
 with inspection, without sleeps. Frontend tests also execute the rebuilt embedded asset.
+
+Schema flow starts from directly decoded five-field `sqlite_schema` records on
+page 1's validated table B-tree. It preserves each declaration's physical cell
+identity, type, name, related table, signed root-page claim, and declaration text.
+The reader follows reconciled overflow links for long schema records and supports
+UTF-8 and both UTF-16 encodings. It never opens an SQLite connection, evaluates SQL,
+loads an extension, or invokes a virtual-table module. See the
+[SQLite schema storage format](https://www.sqlite.org/fileformat2.html#storage_of_the_sql_database_schema).
+
+Only validated storage roots and their bounded B-tree traversal prefixes receive
+schema attribution. Invalid, conflicting, non-root, and out-of-range claims retain
+semantic diagnostics without changing physical page facts. Duplicate names remain
+separate objects; competing claims to one storage root are withheld. WITHOUT ROWID
+tables and physical shadow tables remain independent storage entries. Views,
+triggers, and virtual tables with zero or NULL roots terminate as declaration-only
+objects. Damaged records retain their source cell and unavailable metadata.
+
+Choose a schema object to open the dedicated Schema flow workspace, then follow
+its root, descendant pages, and cells. Page atlas and Schema flow share page/cell
+selectors and selection; the physical evidence panel lists every validated schema
+attribution for its page. Declarations render as text. Cell selection here exposes
+structural evidence only; typed application-value inspection remains separate work.
+
+`--max-schema-bytes` caps aggregate schema-record payload bytes charged for decoding
+(default 16 MiB; zero disables decoding). The graph exposes that ceiling, charged
+bytes, partial/unavailable states, and the first unprocessed cell when known.
+Schema attribution also respects the configured B-tree and overflow traversal
+limits. A malformed or incomplete schema does not invalidate independently valid
+physical evidence. This is a direct storage projection, not full SQL semantic
+validation or the optional semantic-enrichment helper.

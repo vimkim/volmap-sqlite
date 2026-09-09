@@ -67,8 +67,10 @@ function relationshipLabel(kind: Relationship["kind"]): string {
 }
 
 export function PageDetail({
-  detail, pageSize, pageNumber, claims, relationshipsByClaim, onSelectPage, evidenceByte,
+  detail, pageSize, pageNumber, claims, relationshipsByClaim, onSelectPage, evidenceByte, selectedCell, onSelectCell,
 }: {
+  selectedCell: number | null;
+  onSelectCell: (index: number) => void;
   detail: PageEvidence;
   pageSize: number;
   pageNumber: number;
@@ -135,10 +137,11 @@ export function PageDetail({
     </section>
     {detail.allocationRole === "freelist_leaf" && <p>Freelist leaf contents are unused; no cells are interpreted.</p>}
     <h3>Cell inventory</h3>
+    {selectedCell !== null && <p role="status" aria-label="Selected cell">Selected cell: cell:{pageNumber}:{selectedCell} · Structural evidence only.</p>}
     <p className="evidence-note">Identity uses the zero-based cell-pointer-array index, not the rowid or key. Child and overflow pointers link to the validated relationship evidence above.</p>
     <div className="table-scroll"><table aria-label="Cell inventory"><thead><tr><th>Physical identity</th><th>Pointer / offset</th><th>Validated extent</th><th>Structural facts</th><th>Record structure</th></tr></thead>
-      <tbody>{detail.cells.map(cell => <tr key={cell.identity.index}>
-        <td>{`cell:${cell.identity.pageNumber}:${cell.identity.index}`}</td>
+      <tbody>{detail.cells.map(cell => <tr key={cell.identity.index} aria-selected={selectedCell === cell.identity.index}>
+        <td><button type="button" aria-label={`Select cell ${cell.identity.pageNumber}:${cell.identity.index}`} onClick={() => onSelectCell(cell.identity.index)}>{`cell:${cell.identity.pageNumber}:${cell.identity.index}`}</button></td>
         <td>{extent(cell.pointer)} → {cell.offset}</td>
         <td>{extent(cell.range)}{cell.range && <><br />File {extent(cell.range, true)}<br />{cell.range.length} B</>}</td>
         <td>{cell.rowid !== null && <>Rowid: <span>{cell.rowid}</span><br /></>}

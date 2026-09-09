@@ -125,3 +125,17 @@ h2 { font-size: 20px; }
 .sidecar table { width: 100%; margin-top: .75rem; border-collapse: collapse; text-align: left; }
 .sidecar th, .sidecar td { padding: .35rem; border-bottom: 1px solid #59616b; }
 .sidecar-frames { overflow-x: auto; }
+
+.workspace-tabs { display: flex; gap: .5rem; margin: 1rem 0; }
+.workspace-tabs button[aria-pressed="true"], .schema-objects button[aria-pressed="true"] { outline: 2px solid #70d5c1; }
+.schema-objects, .schema-flow { border: 1px solid #59616b; background: #1d2429; padding: 1rem; border-radius: .5rem; margin-bottom: 1rem; min-width: 0; }
+.schema-objects ul { display: flex; flex-wrap: wrap; gap: .5rem; list-style: none; padding: 0; max-height: 16rem; overflow: auto; }
+.schema-objects button { display: grid; gap: .4rem; text-align: left; max-width: 25rem; overflow-wrap: anywhere; }
+.schema-objects button span { font-size: .8rem; }
+.schema-flow pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; padding: 1rem; background: #13181e; }
+.schema-root, .schema-termination, .schema-descendants, .schema-cells { margin-top: 1rem; padding: 1rem; border-left: 3px solid #70d5c1; background: #17221f; }
+.schema-termination { border-color: #e4ad53; }
+.schema-descendants ul { padding-left: 1rem; max-height: 25rem; overflow: auto; }
+.schema-descendants li { margin-bottom: .6rem; }
+.schema-flow h2, .evidence-panel li { overflow-wrap: anywhere; }
+.page-detail tr[aria-selected="true"] { background: #204136; }

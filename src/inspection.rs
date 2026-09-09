@@ -23,6 +23,8 @@ pub use sidecar::{
     JournalEvidence, ShmEvidence, SidecarBudget, SidecarCoverage, SidecarDiagnostic,
     SidecarEvidence, SidecarField, WalEvidence, WalFrame,
 };
+mod schema;
+pub use schema::{SchemaBudget, SchemaEvidence, SchemaObject, SchemaObjectType, SchemaState};
 mod session;
 mod topology;
 pub use btree::{
@@ -126,6 +128,7 @@ pub struct PageEntity {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectionGraph {
+    pub schema: SchemaEvidence,
     pub sidecars: Vec<SidecarEvidence>,
     pub revision: u64,
     pub coverage: Coverage,
