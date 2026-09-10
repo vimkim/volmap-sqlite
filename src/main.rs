@@ -118,6 +118,14 @@ struct Arguments {
     #[arg(long, default_value_t = 100_000)]
     max_wal_frames: u64,
 
+    /// Estimated structural cache bytes shared by page evidence and indexes.
+    #[arg(long, default_value_t = 8 * 1024 * 1024)]
+    page_cache_bytes: u64,
+
+    /// Maximum private spill database bytes (0 disables spilling).
+    #[arg(long, default_value_t = 8 * 1024 * 1024 * 1024)]
+    max_spill_bytes: u64,
+
     /// Maximum aggregate schema-record payload bytes decoded (0 disables schema decoding).
     #[arg(long, default_value_t = 16 * 1024 * 1024)]
     max_schema_bytes: u64,
@@ -142,6 +150,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             max_decoded_bytes: arguments.max_schema_bytes,
         },
     )?;
+    let session = session.with_storage_budget(volmap_sqlite::inspection::StorageBudget {
+        cache_bytes: arguments.page_cache_bytes,
+        max_spill_bytes: arguments.max_spill_bytes,
+    });
     let deep_budget = volmap_sqlite::inspection::DeepBudget {
         max_payload_bytes: arguments.max_deep_bytes,
         max_overflow_pages: arguments.max_deep_overflow_pages,

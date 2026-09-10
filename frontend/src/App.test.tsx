@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App, type InspectionGraph, type SessionStatus } from "./App";
 
@@ -491,5 +491,146 @@ it("labels a refused oversized web projection without showing a partial mosaic",
   const { container } = render(<App />);
   expect(await screen.findByText("Web response limit reached. No partial inspection was returned.")).toBeTruthy();
   expect(container.querySelectorAll("[data-page-number]")).toHaveLength(0);
+  cleanup(); vi.unstubAllGlobals();
+});
+
+it("browses bounded page windows and follows a relationship outside the displayed range", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  const coverage = { ...graph.coverage, evaluated: 300, total: 300 };
+  const bounded = { ...published, coverage, storage: { spilled: true, spilledIndexes: 10, cacheBytes: 4096, spillBytes: 65536, storedPages: 300 } };
+  const claim = { ...graph.relationshipClaims[0], target: { pageNumber: 300 } };
+  const link = { ...graph.relationships[0], target: { pageNumber: 300 } };
+  const snapshot = { ...graph.snapshot, geometry: { ...graph.snapshot.geometry, pageCount: 300 } };
+  const fetcher = vi.fn(async (url: string) => {
+    let result: unknown;
+    if (url.endsWith("/metadata")) result = {
+      ...graph, summary: { snapshot, revision: 1, coverage, topologyCoverage: graph.topologyCoverage,
+        pageCount: 300, claimCount: 1, relationshipCount: 1, traversalCount: 1, diagnosticCount: 0,
+        schemaObjectCount: 0, freelistTrunkCount: 0, pointerMapPageCount: 0 },
+    };
+    else if (url.includes("/traversals/0/pages/")) {
+      const [offset, limit] = url.split("/").slice(-2).map(Number);
+      result = { revision: 1, offset, total: 300, nextOffset: offset + limit < 300 ? offset + limit : null,
+        items: Array.from({ length: Math.min(limit, 300 - offset) }, (_, index) => ({ pageNumber: offset + index + 1 })) };
+    }
+    else if (/\/pages\/\d+\/\d+$/.test(url)) {
+      const [first, limit] = url.split("/").slice(-2).map(Number);
+      const pages = Array.from({ length: Math.min(limit, 301 - first) }, (_, index) => {
+        const number = first + index;
+        const page = structuredClone(graph.pages[0]);
+        page.number = number;
+        page.detail.cells[0].identity.pageNumber = number;
+        return page;
+      });
+      result = { revision: 1, firstPage: first, total: 300, nextPage: first + pages.length <= 300 ? first + pages.length : null, pages };
+    } else if (url.includes("/collections/")) {
+      const kind = url.split("/").at(-3);
+      if (kind === "traversals") throw new Error("Whole traversal records must not be requested");
+      result = { revision: 1, offset: 0, total: 1, nextOffset: null, items: kind === "traversal_headers"
+        ? [{ traversalOffset: 0, kind: "overflow", origin: { type: "page", pageNumber: 1 }, prefixCount: 300, stop: null }]
+        : kind === "claims" ? [claim] : [link] };
+    } else if (url.endsWith("/revisions/1")) throw new Error("Full graph export must not be requested");
+    else result = bounded;
+    return { ok: true, json: async () => result };
+  });
+  vi.stubGlobal("fetch", fetcher);
+  const { container } = render(<App />);
+  expect(await screen.findByText("Atlas pages: 1–32 of 300")).toBeTruthy();
+  expect(container.querySelectorAll("[data-page-number]")).toHaveLength(32);
+  fireEvent.click(screen.getByText("Displayed traversal and relationship records"));
+  fireEvent.click(screen.getByRole("button", { name: "Inspect overflow traversal 0" }));
+  expect(await screen.findByText("Traversal prefix pages: 1–32 of 300")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Next traversal prefix pages" }));
+  expect(await screen.findByText("Traversal prefix pages: 33–64 of 300")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Traversal page 64" }));
+  expect(await screen.findByText("Atlas pages: 64–95 of 300")).toBeTruthy();
+  fireEvent.change(screen.getByRole("spinbutton", { name: "Go to page" }), { target: { value: "1" } });
+  fireEvent.click(screen.getByRole("button", { name: "Go" }));
+  expect(await screen.findByText("Atlas pages: 1–32 of 300")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Follow btree child to page 300" }));
+  expect(await screen.findByText("Atlas pages: 300–300 of 300")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "Page 300" })).toBeTruthy();
+  expect(container.querySelectorAll("[data-page-number]")).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "Select cell 300:0" }));
+  expect(screen.getByLabelText("Selected cell").textContent).toContain("cell:300:0");
+  fireEvent.click(screen.getByRole("button", { name: "Previous atlas pages" }));
+  expect(await screen.findByText("Atlas pages: 268–299 of 300")).toBeTruthy();
+  expect(container.querySelectorAll("[data-page-number]")).toHaveLength(32);
+  expect(screen.getByLabelText("Selected cell").textContent).toContain("cell:300:0");
+  fireEvent.change(screen.getByRole("spinbutton", { name: "Go to page" }), { target: { value: "150" } });
+  fireEvent.click(screen.getByRole("button", { name: "Go" }));
+  expect(await screen.findByText("Atlas pages: 150–181 of 300")).toBeTruthy();
+  expect(fetcher.mock.calls.some(([url]) => url.endsWith("/revisions/1"))).toBe(false);
+  cleanup(); vi.unstubAllGlobals();
+});
+
+it("can reduce a refused evidence window and continue browsing", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  const status = { ...published, storage: { spilled: true, spilledIndexes: 1, cacheBytes: 1024, spillBytes: 32768, storedPages: 3 } };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (/\/pages\/\d+\/32$/.test(url)) return { ok: false, status: 507 };
+    const result = url.endsWith("/metadata") ? {
+      ...graph, summary: { snapshot: graph.snapshot, revision: 1, coverage: graph.coverage, topologyCoverage: graph.topologyCoverage,
+        pageCount: 3, claimCount: 0, relationshipCount: 0, traversalCount: 0, diagnosticCount: 0,
+        schemaObjectCount: 0, freelistTrunkCount: 0, pointerMapPageCount: 0 },
+    } : url.endsWith("/pages/1/1") ? { revision: 1, firstPage: 1, total: 3, nextPage: 2, pages: [graph.pages[0]] } : status;
+    return { ok: true, json: async () => result };
+  }));
+  const { container } = render(<App />);
+  expect(await screen.findByRole("heading", { name: "Evidence window unavailable" })).toBeTruthy();
+  expect(container.querySelectorAll("[data-page-number]")).toHaveLength(0);
+  fireEvent.change(screen.getByRole("combobox", { name: "Records per window" }), { target: { value: "1" } });
+  expect(await screen.findByText("Atlas pages: 1–1 of 3")).toBeTruthy();
+  expect(container.querySelectorAll("[data-page-number]")).toHaveLength(1);
+  cleanup(); vi.unstubAllGlobals();
+});
+
+it("finds a selected page's schema object outside the displayed object window", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  const coverage = { ...graph.coverage, evaluated: 300, total: 300 };
+  const status = { ...published, coverage, storage: { spilled: true, spilledIndexes: 3, cacheBytes: 1024, spillBytes: 65536, storedPages: 300 } };
+  const objects = Array.from({ length: 70 }, (_, index) => ({
+    identity: { pageNumber: 1, index }, evidence: [], objectType: "table", name: `table_${String(index).padStart(3, "0")}`,
+    tableName: `table_${String(index).padStart(3, "0")}`, rootPage: String(index === 69 ? 300 : index + 2),
+    declaration: `CREATE TABLE table_${String(index).padStart(3, "0")}(value)`, root: { pageNumber: index === 69 ? 300 : index + 2 }, state: "complete", diagnostics: [],
+  }));
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    let result: unknown;
+    if (url.endsWith("/metadata")) result = { ...graph, summary: {
+      snapshot: { ...graph.snapshot, geometry: { ...graph.snapshot.geometry, pageCount: 300 } }, revision: 1, coverage, topologyCoverage: graph.topologyCoverage,
+      pageCount: 300, claimCount: 0, relationshipCount: 0, traversalCount: 0, diagnosticCount: 0, schemaObjectCount: 70, freelistTrunkCount: 0, pointerMapPageCount: 0,
+    } };
+    else if (/\/pages\/\d+\/collections\/schema\//.test(url)) {
+      const selected = Number(url.split("/").at(-5));
+      const items = objects.flatMap((object, objectOffset) => object.root.pageNumber === selected ? [{ objectOffset, object }] : []);
+      result = { revision: 1, offset: 0, total: items.length, nextOffset: null, items };
+    } else if (url.includes("/collections/schema/")) {
+      const [offset, limit] = url.split("/").slice(-2).map(Number);
+      result = { revision: 1, offset, total: 70, nextOffset: offset + limit < 70 ? offset + limit : null, items: objects.slice(offset, offset + limit) };
+    } else if (url.includes("/schema/69/pages/")) result = { revision: 1, offset: 0, total: 1, nextOffset: null, items: [{ pageNumber: 300 }] };
+    else if (/\/pages\/\d+\/\d+$/.test(url)) {
+      const [first, limit] = url.split("/").slice(-2).map(Number);
+      const pages = Array.from({ length: Math.min(limit, 301 - first) }, (_, index) => {
+        const page = structuredClone(graph.pages[0]); page.number = first + index;
+        page.detail.cells[0].identity.pageNumber = page.number; return page;
+      });
+      result = { revision: 1, firstPage: first, total: 300, nextPage: first + pages.length <= 300 ? first + pages.length : null, pages };
+    } else if (url.endsWith("/revisions/1")) throw new Error("Full graph export must not be requested");
+    else result = status;
+    return { ok: true, json: async () => result };
+  }));
+  render(<App />);
+  expect(await screen.findByText("Schema objects: 1–32 of 70")).toBeTruthy();
+  fireEvent.change(screen.getByRole("spinbutton", { name: "Go to page" }), { target: { value: "300" } });
+  fireEvent.click(screen.getByRole("button", { name: "Go" }));
+  expect(await screen.findByText("Atlas pages: 300–300 of 300")).toBeTruthy();
+  fireEvent.click(within(screen.getByRole("region", { name: "Schema attribution" })).getByRole("button", { name: "table table_069" }));
+  expect(await screen.findByText("Schema objects: 65–70 of 70")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "table_069" })).toBeTruthy();
+  expect(screen.getByText("CREATE TABLE table_069(value)")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Previous schema objects" }));
+  expect(await screen.findByText("Schema objects: 33–64 of 70")).toBeTruthy();
+  expect(screen.getByRole("heading", { name: "table_069" })).toBeTruthy();
+  expect(screen.getByText("CREATE TABLE table_069(value)")).toBeTruthy();
   cleanup(); vi.unstubAllGlobals();
 });

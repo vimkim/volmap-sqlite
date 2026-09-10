@@ -1,5 +1,4 @@
 //! Direct schema-record interpretation. This projection never changes physical facts.
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 
@@ -8,11 +7,11 @@ use serde::Serialize;
 use super::topology::{Topology, WorkControl};
 use super::{
     BtreeKind, CellDetail, CellIdentity, DatabaseGeometry, EntityIdentity, LocalCoverage,
-    PageEntity, PageIdentity, PageRole, PhysicalEvidence, RelationshipKind, TextEncoding,
+    PageIdentity, PageRole, PhysicalEvidence, RelationshipKind, TextEncoding,
     TopologyCoverageReason, TraversalKind,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaState {
     Complete,
@@ -21,7 +20,7 @@ pub enum SchemaState {
     DeclarationOnly,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaObjectType {
     Table,
@@ -30,7 +29,7 @@ pub enum SchemaObjectType {
     Trigger,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaObject {
     /// Identity comes from the physical schema cell, never the name or rowid.
@@ -44,8 +43,10 @@ pub struct SchemaObject {
     pub declaration: Option<String>,
     pub root: Option<PageIdentity>,
     pub pages: Vec<PageIdentity>,
+    #[serde(skip)]
+    pub(super) attributed_through: Option<u32>,
     pub state: SchemaState,
-    pub diagnostics: Vec<&'static str>,
+    pub diagnostics: Vec<std::borrow::Cow<'static, str>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -86,15 +87,103 @@ impl SchemaEvidence {
     }
 }
 
-#[derive(Default)]
-struct Tree {
-    pages: BTreeSet<u32>,
-    partial: bool,
+pub(super) struct StoredSchema {
+    pub header: SchemaEvidence,
+    pub objects: super::index::Sequence<SchemaObject>,
+    members: super::index_map::IndexMap<(u32, u32), ()>,
+    attributions: super::index_map::IndexMap<(u32, usize), ()>,
+}
+impl std::ops::Deref for StoredSchema {
+    type Target = SchemaEvidence;
+    fn deref(&self) -> &SchemaEvidence {
+        &self.header
+    }
+}
+impl std::ops::DerefMut for StoredSchema {
+    fn deref_mut(&mut self) -> &mut SchemaEvidence {
+        &mut self.header
+    }
+}
+impl StoredSchema {
+    pub(super) fn objects_for_page(&self, page: u32) -> impl Iterator<Item = usize> + '_ {
+        self.attributions
+            .keys_after(Some((page.saturating_sub(1), usize::MAX)))
+            .take_while(move |(owner, _)| *owner == page)
+            .map(|(_, position)| position)
+    }
+    pub(super) fn attributed_pages<'a>(
+        &'a self,
+        object: &'a SchemaObject,
+    ) -> impl Iterator<Item = PageIdentity> + 'a {
+        let root = object.root.as_ref().map_or(0, |root| root.page_number);
+        let last = object.attributed_through.unwrap_or(0);
+        self.members
+            .keys_after(Some((root, 0)))
+            .take_while(move |(owner, page)| *owner == root && *page <= last)
+            .map(|(_, page_number)| PageIdentity { page_number })
+    }
+
+    fn storage_stop(&mut self, error: super::storage::StorageError) {
+        self.header.state = SchemaState::Partial;
+        let code = match error {
+            super::storage::StorageError::Budget => "schema_work_budget",
+            super::storage::StorageError::Unavailable => "private_storage_unavailable",
+        };
+        if !self.header.diagnostics.contains(&code) {
+            self.header.diagnostics.push(code);
+        }
+    }
+
+    pub(super) fn unavailable(budget: SchemaBudget, pages: &super::storage::PageStore) -> Self {
+        Self {
+            header: SchemaEvidence::unavailable(budget),
+            objects: super::index::Sequence::new(std::sync::Arc::clone(&pages.context)),
+            members: super::index_map::IndexMap::new(std::sync::Arc::clone(&pages.context)),
+            attributions: super::index_map::IndexMap::new(std::sync::Arc::clone(&pages.context)),
+        }
+    }
+    pub(super) fn estimated_total(&self) -> Result<u64, super::storage::StorageError> {
+        Ok(self
+            .objects
+            .estimated_total()?
+            .saturating_add(self.members.estimated_total()?))
+    }
+    pub(super) fn metadata(&self, limit: usize) -> SchemaEvidence {
+        let mut evidence = self.header.clone();
+        evidence.objects = self.objects.iter().take(limit).collect();
+        evidence
+    }
+    pub(super) fn materialize(&self) -> Result<SchemaEvidence, super::storage::StorageError> {
+        let mut evidence = self.header.clone();
+        evidence.objects = self.objects.materialize()?;
+        for object in &mut evidence.objects {
+            if let (Some(root), Some(last)) = (&object.root, object.attributed_through) {
+                object.pages = self
+                    .members
+                    .keys_after(Some((root.page_number, 0)))
+                    .take_while(|(owner, page)| *owner == root.page_number && *page <= last)
+                    .map(|(_, page_number)| PageIdentity { page_number })
+                    .collect();
+            }
+        }
+        self.members.check()?;
+        Ok(evidence)
+    }
 }
 
 struct TreeIndex {
-    roots: BTreeMap<u32, Tree>,
-    child_targets: BTreeSet<u32>,
+    roots: super::index_map::IndexMap<u32, bool>,
+    members: super::index_map::IndexMap<(u32, u32), ()>,
+    child_targets: super::index_map::IndexMap<u32, ()>,
+}
+
+impl TreeIndex {
+    fn pages(&self, root: u32) -> impl Iterator<Item = u32> + '_ {
+        self.members
+            .keys_after(Some((root, 0)))
+            .take_while(move |(owner, _)| *owner == root)
+            .map(|(_, page)| page)
+    }
 }
 
 fn source_page(entity: &EntityIdentity) -> u32 {
@@ -125,7 +214,7 @@ fn btree_role(topology: &Topology, number: u32) -> Option<PageRole> {
 /// Reuse bounded traversal prefixes and check their links against final reconciliation.
 fn index_trees(
     topology: &Topology,
-    pages: &[PageEntity],
+    pages: &super::storage::PageStore,
     control: &WorkControl,
     checkpoint: &mut impl FnMut(),
 ) -> Result<TreeIndex, &'static str> {
@@ -138,49 +227,57 @@ fn index_trees(
         check_stop(control)
     };
     step()?;
-    let mut links = BTreeSet::new();
+    let mut links = topology.claims.map();
     for link in &topology.relationships {
         step()?;
         if link.kind == RelationshipKind::BtreeChild {
-            links.insert((source_page(&link.source), link.target.page_number));
+            links.insert((source_page(&link.source), link.target.page_number), ());
         }
     }
-    let mut child_targets = BTreeSet::new();
+    let mut child_targets = topology.claims.map();
     for claim in &topology.claims {
         step()?;
         if claim.kind == RelationshipKind::BtreeChild
             && let Some(target) = &claim.target
         {
-            child_targets.insert(target.page_number);
+            child_targets.insert(target.page_number, ());
         }
     }
-    let mut result = BTreeMap::<u32, Tree>::new();
+    let mut result = topology.claims.map();
+    let mut members = topology.claims.map();
     for traversal in &topology.traversals {
         step()?;
         if traversal.kind != TraversalKind::Btree {
             continue;
         }
         let root = source_page(&traversal.origin);
-        let tree = result.entry(root).or_default();
-        tree.partial |= traversal.stop.is_some()
+        let mut partial = result.get(&root).unwrap_or(false);
+        partial |= traversal.stop.is_some()
             || topology.coverage.reason != TopologyCoverageReason::Complete;
         let mut previous = None;
         for page in &traversal.validated_prefix {
             step()?;
             let number = page.page_number;
             if btree_role(topology, number).is_none()
-                || previous.is_some_and(|parent| !links.contains(&(parent, number)))
+                || previous.is_some_and(|parent| !links.contains_key(&(parent, number)))
             {
-                tree.partial = true;
+                partial = true;
                 break;
             }
-            tree.pages.insert(number);
-            tree.partial |= pages[(number - 1) as usize].detail.coverage != LocalCoverage::Complete;
+            members.insert((root, number), ());
+            partial |= pages
+                .get((number - 1) as usize)
+                .ok_or("private_storage_unavailable")?
+                .detail
+                .coverage
+                != LocalCoverage::Complete;
             previous = Some(number);
         }
+        result.insert(root, partial);
     }
     Ok(TreeIndex {
         roots: result,
+        members,
         child_targets,
     })
 }
@@ -200,27 +297,32 @@ fn check_stop(control: &WorkControl) -> Result<(), &'static str> {
 pub(super) fn inspect(
     file: &File,
     geometry: &DatabaseGeometry,
-    pages: &[PageEntity],
+    pages: &super::storage::PageStore,
     topology: &Topology,
     control: &WorkControl,
     budget: SchemaBudget,
     checkpoint: &mut impl FnMut(),
-) -> SchemaEvidence {
+) -> StoredSchema {
     control.begin_phase(super::TopologyPhase::SchemaInspection, None);
     let trees = match index_trees(topology, pages, control, checkpoint) {
         Ok(trees) => trees,
         Err(code) => {
-            let mut evidence = SchemaEvidence::unavailable(budget);
+            let mut evidence = StoredSchema::unavailable(budget, pages);
             evidence.state = SchemaState::Partial;
             evidence.diagnostics = vec![code];
             return evidence;
         }
     };
-    let Some(schema_tree) = trees.roots.get(&1).filter(|tree| tree.pages.contains(&1)) else {
+    let Some(schema_partial) = trees
+        .roots
+        .get(&1)
+        .filter(|_| trees.members.contains_key(&(1, 1)))
+    else {
         control.mark_unavailable();
-        return SchemaEvidence::unavailable(budget);
+        return StoredSchema::unavailable(budget, pages);
     };
-    let mut result = SchemaEvidence {
+    let mut result = StoredSchema::unavailable(budget, pages);
+    result.header = SchemaEvidence {
         state: SchemaState::Complete,
         objects: vec![],
         diagnostics: vec![],
@@ -235,17 +337,20 @@ pub(super) fn inspect(
         control,
         remaining: budget.max_decoded_bytes,
     };
-    if schema_tree.partial {
+    if schema_partial {
         result.state = SchemaState::Partial;
         result.diagnostics.push("schema_btree_partial");
     }
-    'pages: for number in &schema_tree.pages {
+    'pages: for number in trees.pages(1) {
         if control.traversal_reason().is_some() {
             result.state = SchemaState::Partial;
             result.diagnostics.push(check_stop(control).unwrap_err());
             break;
         }
-        let page = &pages[(*number - 1) as usize];
+        let Some(page) = pages.get((number - 1) as usize) else {
+            result.state = SchemaState::Unavailable;
+            break;
+        };
         if page.detail.kind != Some(BtreeKind::TableLeaf) {
             continue;
         }
@@ -272,35 +377,44 @@ pub(super) fn inspect(
                 result.state = SchemaState::Partial;
             }
             result.objects.push(object);
+            if let Err(error) = pages.check() {
+                result.storage_stop(error);
+                result.stopping_cell = Some(cell.identity.clone());
+                break 'pages;
+            }
         }
     }
     result.decoded_bytes = (budget.max_decoded_bytes - reader.remaining).to_string();
     reconcile_attribution(&mut result, topology, &trees, control);
+    if let Err(error) = pages.check() {
+        result.storage_stop(error);
+    }
     if result.diagnostics.contains(&"schema_decode_budget")
         || result
             .objects
             .iter()
-            .any(|object| object.diagnostics.contains(&"schema_decode_budget"))
+            .any(|object| object.diagnostics.contains(&"schema_decode_budget".into()))
     {
         control.mark_local_budget(super::BudgetKind::SchemaDecodedBytes);
     } else if control.traversal_reason().is_none() {
         control.finish_phase(super::TopologyPhase::SchemaInspection);
     }
+    result.members = trees.members;
     result
 }
 
 fn reconcile_attribution(
-    result: &mut SchemaEvidence,
+    result: &mut StoredSchema,
     topology: &Topology,
     trees: &TreeIndex,
     control: &WorkControl,
 ) {
-    let mut root_counts = BTreeMap::<u32, usize>::new();
+    let mut root_counts = topology.claims.map();
     for object in &result.objects {
         if let Err(code) = check_stop(control) {
-            result.state = SchemaState::Partial;
-            if !result.diagnostics.contains(&code) {
-                result.diagnostics.push(code);
+            result.header.state = SchemaState::Partial;
+            if !result.header.diagnostics.contains(&code) {
+                result.header.diagnostics.push(code);
             }
             return;
         }
@@ -310,14 +424,18 @@ fn reconcile_attribution(
             .and_then(|root| root.parse::<u32>().ok())
             .filter(|root| *root > 1)
         {
-            *root_counts.entry(root).or_default() += 1;
+            let count: usize = root_counts.get(&root).unwrap_or(0);
+            root_counts.insert(root, count.saturating_add(1));
         }
     }
-    for object in &mut result.objects {
+    for index in 0..result.objects.len() {
+        let Some(mut object) = result.objects.get_mut(index) else {
+            return;
+        };
         if let Err(code) = check_stop(control) {
-            result.state = SchemaState::Partial;
-            if !result.diagnostics.contains(&code) {
-                result.diagnostics.push(code);
+            result.header.state = SchemaState::Partial;
+            if !result.header.diagnostics.contains(&code) {
+                result.header.diagnostics.push(code);
             }
             return;
         }
@@ -325,19 +443,26 @@ fn reconcile_attribution(
             .root_page
             .as_deref()
             .and_then(|root| root.parse::<u32>().ok())
-            .is_some_and(|root| root_counts.get(&root).is_some_and(|count| *count > 1))
+            .is_some_and(|root| root_counts.get(&root).is_some_and(|count| count > 1))
         {
             object.state = SchemaState::Unavailable;
-            object.diagnostics.push("schema_root_conflicting");
-            result.state = SchemaState::Partial;
+            object.diagnostics.push(("schema_root_conflicting").into());
+            result.header.state = SchemaState::Partial;
             continue;
         }
-        attribute(object, topology, trees, control);
+        attribute(
+            &mut object,
+            topology,
+            trees,
+            control,
+            index,
+            &mut result.attributions,
+        );
         if matches!(
             object.state,
             SchemaState::Partial | SchemaState::Unavailable
         ) {
-            result.state = SchemaState::Partial;
+            result.header.state = SchemaState::Partial;
         }
     }
 }
@@ -350,7 +475,7 @@ fn decode(reader: &mut PayloadReader<'_>, cell: &CellDetail) -> SchemaObject {
                 page_number: cell.identity.page_number,
             },
             range: cell.local_payload.as_ref().unwrap_or(&cell.pointer).clone(),
-            validation_rule: "sqlite_schema_record",
+            validation_rule: std::borrow::Cow::Borrowed("sqlite_schema_record"),
         }],
         object_type: None,
         name: None,
@@ -359,6 +484,7 @@ fn decode(reader: &mut PayloadReader<'_>, cell: &CellDetail) -> SchemaObject {
         declaration: None,
         root: None,
         pages: vec![],
+        attributed_through: None,
         state: SchemaState::Unavailable,
         diagnostics: vec![],
     };
@@ -373,7 +499,7 @@ fn decode(reader: &mut PayloadReader<'_>, cell: &CellDetail) -> SchemaObject {
             object.root_page = record.root.map(|root| root.to_string());
             object.declaration = record.sql;
         }
-        Err(code) => object.diagnostics.push(code),
+        Err(code) => object.diagnostics.push((code).into()),
     }
     object
 }
@@ -383,6 +509,8 @@ fn attribute(
     topology: &Topology,
     trees: &TreeIndex,
     control: &WorkControl,
+    position: usize,
+    attributions: &mut super::index_map::IndexMap<(u32, usize), ()>,
 ) {
     let Some(kind) = object.object_type else {
         return;
@@ -401,7 +529,9 @@ fn attribute(
         return;
     }
     if virtual_declaration {
-        object.diagnostics.push("schema_virtual_root_invalid");
+        object
+            .diagnostics
+            .push(("schema_virtual_root_invalid").into());
         return;
     }
     let valid_root = root
@@ -413,39 +543,45 @@ fn attribute(
                         && matches!(role, PageRole::IndexLeaf | PageRole::IndexInterior))
             })
         })
-        .filter(|root| !trees.child_targets.contains(root));
+        .filter(|root| !trees.child_targets.contains_key(root));
     if let Err(code) = check_stop(control) {
-        object.diagnostics.push(code);
+        object.diagnostics.push((code).into());
         return;
     }
-    let Some((root, tree)) = valid_root.and_then(|root| {
+    let Some((root, partial)) = valid_root.and_then(|root| {
         trees
             .roots
             .get(&root)
-            .filter(|tree| tree.pages.contains(&root))
+            .filter(|_| trees.members.contains_key(&(root, root)))
             .map(|tree| (root, tree))
     }) else {
-        object.diagnostics.push("schema_root_unavailable");
+        object.diagnostics.push(("schema_root_unavailable").into());
         return;
     };
     object.root = Some(PageIdentity { page_number: root });
-    for number in &tree.pages {
+    for number in trees.pages(root) {
         if let Err(code) = check_stop(control) {
             object.state = SchemaState::Partial;
-            object.diagnostics.push(code);
+            object.diagnostics.push((code).into());
             return;
         }
-        object.pages.push(PageIdentity {
-            page_number: *number,
-        });
+        attributions.insert((number, position), ());
+        if let Err(code) = check_stop(control) {
+            object.state = SchemaState::Partial;
+            object.diagnostics.push(code.into());
+            return;
+        }
+        object.attributed_through = Some(number);
     }
-    object.state = if tree.partial {
+    object.state = if partial {
         SchemaState::Partial
     } else {
         SchemaState::Complete
     };
-    if tree.partial {
-        object.diagnostics.push("schema_attribution_partial");
+    if partial {
+        object
+            .diagnostics
+            .push(("schema_attribution_partial").into());
     }
 }
 

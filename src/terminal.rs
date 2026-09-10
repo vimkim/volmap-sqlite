@@ -8,6 +8,7 @@ use crate::inspection::{
 mod evidence;
 mod navigation;
 mod runtime;
+mod window;
 pub use runtime::run;
 mod deep;
 
@@ -27,20 +28,23 @@ pub enum Key {
 enum Focus {
     Database,
     Schema,
-    Object(CellIdentity),
+    Object(CellIdentity, usize),
     Btrees,
     Freelist,
     PointerMaps,
     Diagnostics,
     Page(u32),
     Cell(CellIdentity),
+    Traversal(usize),
     Help,
+    WindowOffset(usize),
 }
 
 struct Location {
     focus: Focus,
     label: String,
     selected: usize,
+    offset: usize,
 }
 struct Entry {
     label: String,
@@ -51,6 +55,9 @@ struct Entry {
 pub struct TerminalFlow {
     session: Arc<InspectionSession>,
     graph: Option<Arc<InspectionGraph>>,
+    ranges: Vec<window::Range>,
+    schema_positions: Vec<usize>,
+    traversal_headers: Vec<crate::inspection::TraversalHeader>,
     path: Vec<Location>,
     revision: u64,
     evidence_offset: usize,
@@ -71,10 +78,14 @@ impl TerminalFlow {
         let mut flow = Self {
             session,
             graph: None,
+            ranges: Vec::new(),
+            schema_positions: Vec::new(),
+            traversal_headers: Vec::new(),
             path: vec![Location {
                 focus: Focus::Database,
                 label: "Database".into(),
                 selected: 0,
+                offset: 0,
             }],
             revision: 1,
             evidence_offset: 0,
@@ -106,10 +117,7 @@ impl TerminalFlow {
             self.withhold_values();
             self.message = "Invalidated snapshot: navigation and values withheld".into();
         } else if self.graph.is_none() && status.available_revisions.contains(&self.revision) {
-            match self.session.revision(self.revision) {
-                Ok(graph) => self.graph = Some(graph),
-                Err(_) => self.message = "Revision unavailable".into(),
-            }
+            self.load_window();
         }
     }
 
@@ -127,13 +135,11 @@ impl TerminalFlow {
         };
         if let Some(target) = target {
             self.withhold_values();
-            match self.session.revision(target) {
-                Ok(graph) => {
-                    self.graph = Some(graph);
-                    self.revision = target;
-                    self.message = "Revision changed; values withheld".into();
-                }
-                Err(_) => self.message = "Revision unavailable".into(),
+            self.revision = target;
+            self.graph = None;
+            self.load_window();
+            if self.graph.is_some() {
+                self.message = "Revision changed; values withheld".into();
             }
         }
     }
@@ -147,11 +153,11 @@ impl TerminalFlow {
             return;
         }
         let Some(page) = page.and_then(|number| {
-            self.graph
-                .as_ref()?
+            self.session
+                .page_batch(self.revision, number, 1)
+                .ok()?
                 .pages
-                .iter()
-                .find(|page| page.number == number)
+                .pop()
         }) else {
             self.message = "Invalid selector: page unavailable in this revision".into();
             return;
@@ -246,11 +252,14 @@ impl TerminalFlow {
             Key::Char(']') => self.change_revision(true),
             Key::Back => {
                 self.withhold_values();
+                self.graph = None;
                 if self.path.len() > 1 {
                     self.path.pop();
                 }
                 self.evidence_offset = 0;
             }
+            Key::Char('>') => self.shift_window(true),
+            Key::Char('<') => self.shift_window(false),
             Key::Char('?') => self.enter(Focus::Help, "Help".into()),
             Key::Char('!') => self.enter(Focus::Diagnostics, "Diagnostics".into()),
             Key::Up | Key::Char('k') => {
@@ -279,11 +288,17 @@ impl TerminalFlow {
     }
 
     fn enter(&mut self, focus: Focus, label: String) {
+        if let Focus::WindowOffset(offset) = focus {
+            self.set_window(offset);
+            return;
+        }
         self.withhold_values();
+        self.graph = None;
         self.path.push(Location {
             focus,
             label,
             selected: 0,
+            offset: 0,
         });
         self.evidence_offset = 0;
         self.evidence_column = 0;
@@ -372,7 +387,7 @@ impl TerminalFlow {
             return abbreviated;
         }
         match self.focus() {
-            Focus::Object(identity) => format!(
+            Focus::Object(identity, _) => format!(
                 "... / Schema cell {}:{}",
                 identity.page_number, identity.index
             ),
@@ -407,7 +422,18 @@ impl TerminalFlow {
                 );
             }
         } else {
-            evidence.extend(evidence::lines(self.focus(), self.graph.as_deref()));
+            let selected = matches!(self.focus(), Focus::Page(_) | Focus::Cell(_));
+            if !selected {
+                evidence.extend(self.ranges.iter().map(window::Range::label));
+            }
+            evidence.extend(evidence::lines(
+                self.focus(),
+                self.graph.as_deref(),
+                self.location().offset,
+            ));
+            if selected {
+                evidence.extend(self.ranges.iter().map(window::Range::label));
+            }
         }
         if let Some(diagnostic) = &status.diagnostic {
             evidence.push(format!("{}: {}", diagnostic.code, diagnostic.message));

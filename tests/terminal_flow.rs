@@ -4,6 +4,104 @@ use volmap_sqlite::inspection::InspectionSession;
 use volmap_sqlite::terminal::{Key, TerminalFlow};
 
 #[test]
+fn traversal_prefix_windows_navigate_beyond_the_first_batch() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("traversal.sqlite");
+    Connection::open(&path).unwrap().execute_batch("PRAGMA page_size=512; CREATE TABLE entries(value); INSERT INTO entries VALUES(zeroblob(200000));").unwrap();
+    let session = Arc::new(InspectionSession::open(&path).unwrap());
+    let mut terminal = TerminalFlow::new(session);
+    goto(&mut terminal, "2:0");
+    assert!(
+        terminal
+            .screen(160, 80)
+            .join("\n")
+            .contains("Traversal Overflow")
+    );
+    terminal.key(Key::Down);
+    terminal.key(Key::Enter);
+    assert!(
+        terminal
+            .screen(160, 80)
+            .join("\n")
+            .contains("Traversal prefix pages: 1-32 of")
+    );
+    terminal.key(Key::Char('>'));
+    assert!(
+        terminal
+            .screen(160, 80)
+            .join("\n")
+            .contains("Traversal prefix pages: 33-64 of")
+    );
+    terminal.key(Key::Enter);
+    assert!(terminal.screen(160, 80).join("\n").contains("Page 35"));
+}
+
+#[test]
+fn collection_windows_reach_every_schema_object_and_off_window_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("terminal-windows.sqlite");
+    let database = Connection::open(&path).unwrap();
+    for number in 0..70 {
+        database
+            .execute_batch(&format!(
+                "CREATE TABLE table_{number:03}(value); INSERT INTO table_{number:03} VALUES(1);"
+            ))
+            .unwrap();
+    }
+    drop(database);
+    let session = Arc::new(
+        InspectionSession::begin(&path)
+            .unwrap()
+            .with_storage_budget(volmap_sqlite::inspection::StorageBudget {
+                cache_bytes: 0,
+                max_spill_bytes: 16 * 1024 * 1024,
+            }),
+    );
+    session
+        .scan(|_| volmap_sqlite::inspection::ScanControl::Continue)
+        .unwrap();
+    let last = session.revision_summary(1).unwrap().page_count;
+    let mut terminal = TerminalFlow::new(session);
+    terminal.key(Key::Enter);
+    assert!(
+        terminal
+            .screen(160, 80)
+            .join("\n")
+            .contains("Schema objects: 1-32 of 70")
+    );
+    terminal.key(Key::Char('>'));
+    assert!(
+        terminal
+            .screen(160, 80)
+            .join("\n")
+            .contains("Schema objects: 33-64 of 70")
+    );
+    terminal.key(Key::Char('>'));
+    let screen = terminal.screen(160, 80).join("\n");
+    assert!(screen.contains("Schema objects: 65-70 of 70"));
+    assert!(screen.contains("table_069"));
+    terminal.key(Key::Char('g'));
+    for character in last.to_string().chars() {
+        terminal.key(Key::Char(character));
+    }
+    terminal.key(Key::Enter);
+    let screen = terminal.screen(160, 80).join("\n");
+    assert!(screen.contains(&format!("Page {last}")));
+    assert!(!screen.contains("Invalid selector"));
+    terminal.key(Key::Enter);
+    assert!(terminal.screen(160, 80).join("\n").contains("Cell 0"));
+    terminal.key(Key::Back);
+    terminal.key(Key::Down);
+    terminal.key(Key::Enter);
+    assert!(
+        terminal
+            .screen(160, 80)
+            .join("\n")
+            .contains("CREATE TABLE table_069")
+    );
+}
+
+#[test]
 fn navigates_schema_to_page_and_cell_using_shared_physical_evidence() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("fixture.sqlite");

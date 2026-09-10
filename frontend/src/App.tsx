@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { WindowedAtlas, type WindowNavigation } from "./WindowedAtlas";
 import {
   PageDetail, type PageEvidence, type PhysicalEvidence, type Relationship,
   type RelationshipClaim, type StructuralDiagnostic,
@@ -75,6 +76,7 @@ interface Coverage {
 }
 
 export interface SessionStatus {
+  storage?: { spilled: boolean; spilledIndexes: number; cacheBytes: number; spillBytes: number; storedPages: number };
   operationalBudget?: { maxProcessedCells: number; maxPhaseUnits: number; maxResidentBytes: number; maxFreelistTrunks?: number };
   deepLimits?: { maxJobs: number; maxConcurrentJobs: number; perJob: Budget };
   webLimits?: { requestBytes: number; responseBytes: number; collectionItems: number; concurrentRequests: number };
@@ -107,10 +109,11 @@ const encodingLabel: Record<TextEncoding, string> = {
   utf16_be: "UTF-16 BE",
 };
 
-function Atlas({ graph, status, viewRevision, onRevision }: { graph: InspectionGraph; status: SessionStatus; viewRevision: number | null; onRevision: (revision: number | null) => void }) {
+export function Atlas({ graph, status, viewRevision, onRevision, navigation }: { graph: InspectionGraph; status: SessionStatus; viewRevision: number | null; onRevision: (revision: number | null) => void; navigation?: WindowNavigation }) {
   const { geometry, source } = graph.snapshot;
   const [workspace, setWorkspace] = useState<"atlas" | "schema">("atlas");
-  const [selection, setSelection] = useState<EntitySelector>({ type: "page", pageNumber: 1 });
+  const [localSelection, setSelection] = useState<EntitySelector>({ type: "page", pageNumber: 1 });
+  const selection = navigation?.selection ?? localSelection;
   const [selectedSchema, setSelectedSchema] = useState<string | null>(null);
   const selectedPage = selection.pageNumber;
   const [evidenceLocus, setEvidenceLocus] = useState<PhysicalEvidence | null>(null);
@@ -162,23 +165,27 @@ function Atlas({ graph, status, viewRevision, onRevision }: { graph: InspectionG
   const activeTrunk = graph.freelist.trunks.find(trunk => trunk.page.pageNumber === selectedPage);
   const selectEntity = (selector: EntitySelector) => {
     if (selector.type === "schema") {
-      const object = graph.schema.objects.find(object => selectorKey(schemaSelector(object)) === selectorKey(selector));
+      const object = graph.schema.objects.find(object => selectorKey(schemaSelector(object)) === selectorKey(selector))
+        ?? navigation?.attribution.find(object => selectorKey(schemaSelector(object)) === selectorKey(selector));
       if (!object) return;
       setSelectedSchema(selectorKey(selector));
       setWorkspace("schema");
-      if (object.root && projection.pagesByNumber.has(object.root.pageNumber)) {
+      if (object.root && (navigation || projection.pagesByNumber.has(object.root.pageNumber))) {
         setSelection({ type: "page", pageNumber: object.root.pageNumber });
       }
     } else {
       const page = projection.pagesByNumber.get(selector.pageNumber);
-      if (!page || (selector.type === "cell" && !page.detail.cells.some(cell => cell.identity.index === selector.cellIndex))) return;
+      if (navigation ? selector.pageNumber < 1 || selector.pageNumber > graph.coverage.evaluated
+        : !page || (selector.type === "cell" && !page.detail.cells.some(cell => cell.identity.index === selector.cellIndex))) return;
       setSelection(selector);
     }
+    navigation?.onSelect(selector);
     setEvidenceLocus(null);
   };
   const selectPage = (page: number) => selectEntity({ type: "page", pageNumber: page });
-  const activeSchema = graph.schema.objects.find(object => selectorKey(schemaSelector(object)) === selectedSchema);
-  const attribution = graph.schema.objects.filter(object => object.pages.some(page => page.pageNumber === selectedPage));
+  const activeSchema = graph.schema.objects.find(object => selectorKey(schemaSelector(object)) === selectedSchema)
+    ?? (navigation?.selectedSchema && selectorKey(schemaSelector(navigation.selectedSchema)) === selectedSchema ? navigation.selectedSchema : undefined);
+  const attribution = navigation?.attribution ?? graph.schema.objects.filter(object => object.pages.some(page => page.pageNumber === selectedPage));
 
   return (
     <main className="workspace">
@@ -203,6 +210,7 @@ function Atlas({ graph, status, viewRevision, onRevision }: { graph: InspectionG
         {status.availableRevisions.map(revision => <option key={revision} value={revision}>Revision {revision}</option>)}
       </select></label>
       <InspectionNotice status={status} />
+      {navigation?.controls}
       <Sidecars evidence={graph.sidecars} />
 
       <section className="geometry" aria-label="Snapshot geometry">
@@ -228,7 +236,7 @@ function Atlas({ graph, status, viewRevision, onRevision }: { graph: InspectionG
 
       {workspace === "atlas" && <><Freelist evidence={graph.freelist} prefix={freelistTraversal?.validatedPrefix ?? []}
         firstNavigable={firstFreelistLink?.target.pageNumber ?? null} onSelectPage={selectPage} />
-      <PointerMap evidence={graph.pointerMap} selectedPage={selectedPage} availablePages={projection.pagesByNumber} onSelectPage={selectPage} /></>}
+      <PointerMap evidence={graph.pointerMap} selectedPage={selectedPage} availablePages={navigation ? { has: number => number >= 1 && number <= graph.coverage.evaluated } : projection.pagesByNumber} onSelectPage={selectPage} /></>}
       <SchemaObjects evidence={graph.schema} selected={selectedSchema} onSelect={selectEntity} />
       <div className="content-grid">
         {workspace === "schema" ? <SchemaFlow graph={graph} object={activeSchema} selection={selection} onSelect={selectEntity} /> : <section className="atlas-panel">
@@ -237,11 +245,11 @@ function Atlas({ graph, status, viewRevision, onRevision }: { graph: InspectionG
               <p className="eyebrow">Physical projection</p>
               <h2>{graph.coverage.reason === "complete" ? "Main-file mosaic" : "Inspected page prefix"}</h2>
             </div>
-            <p>{graph.pages.length.toLocaleString()} inspected pages</p>
+            <p>{graph.coverage.evaluated.toLocaleString()} inspected pages{navigation && ` · ${navigation.gridPages.size} shown`}</p>
           </div>
           <RoleLegend />
           <div className="mosaic">
-            {graph.pages.map((page) => (
+            {graph.pages.filter(page => !navigation || navigation.gridPages.has(page.number)).map((page) => (
               <button
                 className={page.number === selectedPage ? "page selected" : "page"}
                 data-page-number={page.number}
@@ -414,7 +422,7 @@ export function App() {
         if (!response.ok) throw new Error(`Inspection request failed (${response.status})`);
         let next: SessionStatus = await response.json();
         if (next.state === "invalidated" || next.revision === null) cached = null;
-        else if (cached?.revision !== (viewRevision ?? next.revision)) {
+        else if (!next.storage && cached?.revision !== (viewRevision ?? next.revision)) {
           const revision = await fetch(`${base}/revisions/${viewRevision ?? next.revision}`, { cache: "no-store", signal: abort.signal });
           if (revision.status === 409) {
             next = await revision.json();
@@ -459,6 +467,7 @@ export function App() {
 
   if (error) return <main className="message"><h1>Page atlas unavailable</h1><p>{error}</p></main>;
   if (!status) return <main className="message"><h1>Opening inspection…</h1></main>;
+  if (status.storage && status.revision !== null && status.state !== "invalidated") return <WindowedAtlas status={status} revision={viewRevision ?? status.revision} viewRevision={viewRevision} onRevision={setViewRevision} />;
   if (graph) return <Atlas graph={graph} status={status} viewRevision={viewRevision} onRevision={setViewRevision} />;
   return <main className="workspace">
     <p className="eyebrow">Volmap SQLite Inspector</p>

@@ -26,7 +26,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     let start = Instant::now();
     let session = InspectionSession::begin(&path)?;
     session.scan(|_| ScanControl::Continue)?;
-    let graph = session.graph()?;
+    let graph = session.revision_summary(1)?;
+    let mut first = 1;
+    let mut cells = 0;
+    loop {
+        let batch = session.page_batch(1, first, 128)?;
+        cells += batch
+            .pages
+            .iter()
+            .map(|page| page.detail.cells.len())
+            .sum::<usize>();
+        match batch.next_page {
+            Some(next) => first = next,
+            None => break,
+        }
+    }
     let status = std::fs::read_to_string("/proc/self/status")?;
     let peak = status
         .lines()
@@ -34,20 +48,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         .unwrap_or("unknown");
     println!(
         "rows={rows} pages={} cells={} elapsed_ms={} {peak}",
-        graph.pages.len(),
-        graph
-            .pages
-            .iter()
-            .map(|p| p.detail.cells.len())
-            .sum::<usize>(),
+        graph.page_count,
+        cells,
         start.elapsed().as_millis()
     );
     println!(
         "inventory={:?} topology={:?} schema={:?} budgets={:?}",
         graph.coverage.reason,
         graph.topology_coverage.reason,
-        graph.schema.state,
-        graph.operational_budget
+        graph.schema_state,
+        session.status().operational_budget
     );
+    println!("storage={:?}", session.status().storage);
     Ok(())
 }

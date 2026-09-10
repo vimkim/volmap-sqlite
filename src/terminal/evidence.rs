@@ -5,13 +5,13 @@ const HELP: &[&str] = &[
     "Keyboard help",
     "Up/k Down/j: move; Enter: enter target; Esc/Backspace: back",
     "PgUp/PgDn: vertical evidence pages; h/l: horizontal evidence scroll; 0: reset scroll",
-    "!: diagnostics; ?: help; q: quit",
+    "!: diagnostics; ?: help; q: quit; </>: previous/next collection window",
     "g: go to page[:cell]; s: stop fast scan with partial coverage",
     "d: deep-inspect selected cell; c: cancel work; [: older revision; ]: newer revision",
     "Only explicit deep inspection reveals typed values. Raw payload bytes are never shown.",
 ];
 
-pub(super) fn lines(focus: &Focus, graph: Option<&InspectionGraph>) -> Vec<String> {
+pub(super) fn lines(focus: &Focus, graph: Option<&InspectionGraph>, offset: usize) -> Vec<String> {
     if *focus == Focus::Help {
         return HELP.iter().map(|line| (*line).to_owned()).collect();
     }
@@ -21,17 +21,30 @@ pub(super) fn lines(focus: &Focus, graph: Option<&InspectionGraph>) -> Vec<Strin
     let mut lines = Vec::new();
     match focus {
         Focus::Database => return database_lines(graph),
+        Focus::Traversal(_) => {
+            if let Some(traversal) = graph.traversals.first() {
+                lines.push(format!(
+                    "Traversal {:?} from {:?}",
+                    traversal.kind, traversal.origin
+                ));
+                lines.push(format!("Termination: {:?}", traversal.stop));
+                lines.push(
+                    "The prefix window preserves traversal order; enter a page to inspect it."
+                        .into(),
+                );
+            }
+        }
         Focus::Schema => lines.push(format!(
             "Direct schema coverage: {:?}; {} objects",
             graph.schema.state,
             graph.schema.objects.len()
         )),
-        Focus::Object(identity) => return object_lines(graph, identity),
+        Focus::Object(identity, _) => return object_lines(graph, identity),
         Focus::Page(number)
         | Focus::Cell(crate::inspection::CellIdentity {
             page_number: number,
             ..
-        }) => return page_lines(graph, *number, focus),
+        }) => return page_lines(graph, *number, focus, offset),
         Focus::Btrees => lines.push(
             "B-tree storage: directly observed pages and their reconciled role claims.".into(),
         ),
@@ -85,7 +98,7 @@ pub(super) fn lines(focus: &Focus, graph: Option<&InspectionGraph>) -> Vec<Strin
                 lines.push("No diagnostics in this revision".into());
             }
         }
-        Focus::Help => unreachable!(),
+        Focus::Help | Focus::WindowOffset(_) => unreachable!(),
     }
     lines
 }
@@ -186,7 +199,7 @@ fn object_lines(
     lines
 }
 
-fn page_lines(graph: &InspectionGraph, number: u32, focus: &Focus) -> Vec<String> {
+fn page_lines(graph: &InspectionGraph, number: u32, focus: &Focus, offset: usize) -> Vec<String> {
     let mut lines = Vec::new();
 
     if let Some(page) = graph.pages.iter().find(|page| page.number == number) {
@@ -211,7 +224,12 @@ fn page_lines(graph: &InspectionGraph, number: u32, focus: &Focus) -> Vec<String
             .iter()
             .find(|map| map.page.page_number == number)
         {
-            for entry in &map.entries {
+            for entry in map
+                .entries
+                .iter()
+                .skip(offset)
+                .take(super::window::SIZE as usize)
+            {
                 lines.push(format!(
                     "Pointer-map target {:?} | {:?} | parent {:?} | {:?}",
                     entry.target, entry.kind, entry.parent_value, entry.state
@@ -225,7 +243,13 @@ fn page_lines(graph: &InspectionGraph, number: u32, focus: &Focus) -> Vec<String
                 );
             }
         }
-        for region in &page.detail.regions {
+        for region in page
+            .detail
+            .regions
+            .iter()
+            .skip(offset)
+            .take(super::window::SIZE as usize)
+        {
             lines.push(format!(
                 "{}: page bytes [{}, {}) | file offset {}",
                 region.kind,
@@ -234,7 +258,13 @@ fn page_lines(graph: &InspectionGraph, number: u32, focus: &Focus) -> Vec<String
                 region.range.file_offset
             ));
         }
-        for claim in &page.classification.claims {
+        for claim in page
+            .classification
+            .claims
+            .iter()
+            .skip(offset)
+            .take(super::window::SIZE as usize)
+        {
             lines.push(format!(
                 "Role {:?} | {:?} | {}",
                 claim.role, claim.state, claim.source
@@ -313,7 +343,7 @@ fn cell_lines(
                 range.file_offset
             ));
         }
-        if let Some(code) = cell.diagnostic {
+        if let Some(code) = &cell.diagnostic {
             lines.push(format!("Diagnostic: {code}"));
         }
         lines.push("Press d for explicit typed values; c hides values and cancels work.".into());
@@ -345,7 +375,7 @@ fn page_header_lines(page: &crate::inspection::PageEntity) -> Vec<String> {
                 range.file_offset
             ));
         }
-        if let Some(code) = block.diagnostic {
+        if let Some(code) = &block.diagnostic {
             lines.push(format!("Diagnostic: {code}"));
         }
     }

@@ -57,6 +57,20 @@ pub fn atlas_router_for_listener(
             "/api/snapshots/{snapshot_id}/revisions/{revision}",
             get(revision),
         )
+        .route(
+            "/api/snapshots/{snapshot_id}/revisions/{revision}/summary",
+            get(revision_summary),
+        )
+        .route(
+            "/api/snapshots/{snapshot_id}/revisions/{revision}/pages/{first}/{limit}",
+            get(page_batch),
+        )
+        .route("/api/snapshots/{snapshot_id}/revisions/{revision}/collections/{collection}/{offset}/{limit}", get(collection_batch))
+        .route("/api/snapshots/{snapshot_id}/revisions/{revision}/metadata", get(revision_metadata))
+        .route("/api/snapshots/{snapshot_id}/revisions/{revision}/schema/{object}/pages/{offset}/{limit}", get(schema_page_batch))
+        .route("/api/snapshots/{snapshot_id}/revisions/{revision}/traversals/{traversal}/pages/{offset}/{limit}", get(traversal_prefix_batch))
+        .route("/api/snapshots/{snapshot_id}/revisions/{revision}/pages/{page}/collections/{collection}/{offset}/{limit}", get(page_collection_batch))
+        .route("/api/snapshots/{snapshot_id}/revisions/{revision}/pages/{page}/allocation/{kind}", get(page_allocation))
         .route("/api/snapshots/{snapshot_id}/evidence", get(evidence))
         .route("/api/snapshots/{snapshot_id}/cancel", post(cancel))
         .route(
@@ -157,8 +171,343 @@ async fn revision(
         Ok(Err(InspectionError::Invalidated)) => {
             security::json_status(StatusCode::CONFLICT, &session.status(), limits)
         }
+        Ok(Err(InspectionError::CollectionBudget)) => security::budget(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "response_collection_budget",
+        ),
         Ok(Err(_)) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn revision_metadata(
+    Path((id, revision)): Path<(String, u64)>,
+    State(state): State<WebState>,
+) -> Response {
+    if id != state.session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let result =
+        tokio::task::spawn_blocking(move || state.session.revision_metadata(revision)).await;
+    projection_response(result, state.limits)
+}
+
+async fn revision_summary(
+    Path((id, revision)): Path<(String, u64)>,
+    State(state): State<WebState>,
+) -> Response {
+    if id != state.session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let result =
+        tokio::task::spawn_blocking(move || state.session.revision_summary(revision)).await;
+    projection_response(result, state.limits)
+}
+
+async fn page_batch(
+    Path((id, revision, first, limit)): Path<(String, u64, u32, u32)>,
+    State(state): State<WebState>,
+) -> Response {
+    if id != state.session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let result =
+        tokio::task::spawn_blocking(move || state.session.page_batch(revision, first, limit)).await;
+    projection_response(result, state.limits)
+}
+
+async fn collection_batch(
+    Path((id, revision, collection, offset, limit)): Path<(String, u64, String, usize, u32)>,
+    State(state): State<WebState>,
+) -> Response {
+    if id != state.session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match collection.as_str() {
+        "traversal_headers" => {
+            project_collection(
+                state,
+                revision,
+                offset,
+                limit,
+                |session, revision, offset, limit| {
+                    session.traversal_header_batch(revision, None, offset, limit)
+                },
+            )
+            .await
+        }
+        "schema" => {
+            project_collection(
+                state,
+                revision,
+                offset,
+                limit,
+                InspectionSession::schema_batch,
+            )
+            .await
+        }
+        "claims" => {
+            project_collection(
+                state,
+                revision,
+                offset,
+                limit,
+                InspectionSession::claim_batch,
+            )
+            .await
+        }
+        "relationships" => {
+            project_collection(
+                state,
+                revision,
+                offset,
+                limit,
+                InspectionSession::relationship_batch,
+            )
+            .await
+        }
+        "traversals" => {
+            project_collection(
+                state,
+                revision,
+                offset,
+                limit,
+                InspectionSession::traversal_batch,
+            )
+            .await
+        }
+        "diagnostics" => {
+            project_collection(
+                state,
+                revision,
+                offset,
+                limit,
+                InspectionSession::diagnostic_batch,
+            )
+            .await
+        }
+        "freelist_trunks" => {
+            project_collection(
+                state,
+                revision,
+                offset,
+                limit,
+                InspectionSession::freelist_trunk_batch,
+            )
+            .await
+        }
+        "pointer_maps" => {
+            project_collection(
+                state,
+                revision,
+                offset,
+                limit,
+                InspectionSession::pointer_map_batch,
+            )
+            .await
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn traversal_prefix_batch(
+    Path((id, revision, traversal, offset, limit)): Path<(String, u64, usize, usize, u32)>,
+    State(state): State<WebState>,
+) -> Response {
+    if id != state.session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        state
+            .session
+            .traversal_prefix_batch(revision, traversal, offset, limit)
+    })
+    .await;
+    projection_response(result, state.limits)
+}
+
+async fn schema_page_batch(
+    Path((id, revision, object, offset, limit)): Path<(String, u64, usize, usize, u32)>,
+    State(state): State<WebState>,
+) -> Response {
+    if id != state.session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        state
+            .session
+            .schema_page_batch(revision, object, offset, limit)
+    })
+    .await;
+    projection_response(result, state.limits)
+}
+
+type PageCollectionQuery<T> = fn(
+    &InspectionSession,
+    u64,
+    u32,
+    usize,
+    u32,
+) -> Result<crate::inspection::CollectionBatch<T>, InspectionError>;
+
+async fn page_allocation(
+    Path((id, revision, page, kind)): Path<(String, u64, u32, String)>,
+    State(state): State<WebState>,
+) -> Response {
+    if id != state.session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match kind.as_str() {
+        "pointer_map" => projection_response(
+            tokio::task::spawn_blocking(move || state.session.page_pointer_map(revision, page))
+                .await,
+            state.limits,
+        ),
+        "freelist_trunk" => projection_response(
+            tokio::task::spawn_blocking(move || state.session.page_freelist_trunk(revision, page))
+                .await,
+            state.limits,
+        ),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn page_collection_batch(
+    Path((id, revision, page, collection, offset, limit)): Path<(
+        String,
+        u64,
+        u32,
+        String,
+        usize,
+        u32,
+    )>,
+    State(state): State<WebState>,
+) -> Response {
+    if id != state.session.status().snapshot_id {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match collection.as_str() {
+        "traversal_headers" => {
+            project_page_collection(
+                state,
+                revision,
+                page,
+                offset,
+                limit,
+                |session, revision, page, offset, limit| {
+                    session.traversal_header_batch(revision, Some(page), offset, limit)
+                },
+            )
+            .await
+        }
+        "schema" => {
+            project_page_collection(
+                state,
+                revision,
+                page,
+                offset,
+                limit,
+                InspectionSession::page_schema_batch,
+            )
+            .await
+        }
+        "claims" => {
+            project_page_collection(
+                state,
+                revision,
+                page,
+                offset,
+                limit,
+                InspectionSession::page_claim_batch,
+            )
+            .await
+        }
+        "relationships" => {
+            project_page_collection(
+                state,
+                revision,
+                page,
+                offset,
+                limit,
+                InspectionSession::page_relationship_batch,
+            )
+            .await
+        }
+        "traversals" => {
+            project_page_collection(
+                state,
+                revision,
+                page,
+                offset,
+                limit,
+                InspectionSession::page_traversal_batch,
+            )
+            .await
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn project_page_collection<T: serde::Serialize + Send + 'static>(
+    state: WebState,
+    revision: u64,
+    page: u32,
+    offset: usize,
+    limit: u32,
+    query: PageCollectionQuery<T>,
+) -> Response {
+    let result =
+        tokio::task::spawn_blocking(move || query(&state.session, revision, page, offset, limit))
+            .await;
+    projection_response(result, state.limits)
+}
+
+type CollectionQuery<T> = fn(
+    &InspectionSession,
+    u64,
+    usize,
+    u32,
+) -> Result<crate::inspection::CollectionBatch<T>, InspectionError>;
+
+async fn project_collection<T: serde::Serialize + Send + 'static>(
+    state: WebState,
+    revision: u64,
+    offset: usize,
+    limit: u32,
+    query: CollectionQuery<T>,
+) -> Response {
+    let limits = state.limits;
+    let result =
+        tokio::task::spawn_blocking(move || query(&state.session, revision, offset, limit)).await;
+    projection_response(result, limits)
+}
+
+fn projection_response<T: serde::Serialize>(
+    result: Result<Result<T, InspectionError>, tokio::task::JoinError>,
+    limits: WebLimits,
+) -> Response {
+    match result {
+        Ok(Ok(value)) => security::json(&value, limits),
+        Ok(Err(InspectionError::InvalidCollectionRange)) => {
+            security::error(StatusCode::BAD_REQUEST, "invalid_collection_range")
+        }
+        Ok(Err(InspectionError::InvalidPageRange)) => {
+            security::error(StatusCode::BAD_REQUEST, "invalid_page_range")
+        }
+        Ok(Err(InspectionError::CollectionBudget)) => security::budget(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "response_collection_budget",
+        ),
+        Ok(Err(InspectionError::Invalidated)) => {
+            security::error(StatusCode::CONFLICT, "snapshot_invalidated")
+        }
+        Ok(Err(InspectionError::RevisionUnavailable | InspectionError::EntityUnavailable)) => {
+            StatusCode::NOT_FOUND.into_response()
+        }
+        _ => security::error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "inspection_storage_unavailable",
+        ),
     }
 }
 

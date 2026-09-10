@@ -101,7 +101,7 @@ export function SchemaFlow({ graph, object, selection, onSelect }: {
           <ul>{object.pages.map(page => {
             const parent = parents.get(page.pageNumber);
             return <li key={page.pageNumber}>
-              {parent === undefined ? <span>Root page {page.pageNumber}</span> : <button type="button"
+              {parent === undefined ? <button type="button" onClick={() => onSelect({ type: "page", pageNumber: page.pageNumber })}>{page.pageNumber === object.root?.pageNumber ? "Root" : "Attributed"} page {page.pageNumber}</button> : <button type="button"
                 onClick={() => onSelect({ type: "page", pageNumber: page.pageNumber })}>
                 Descendant page {page.pageNumber} from page {parent}
               </button>}

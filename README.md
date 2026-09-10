@@ -383,7 +383,119 @@ measured. This is a cooperative ceiling at validation boundaries, not an OS memo
 sandbox: runtime/allocator overhead can change between observations. Operators
 requiring a hard process/container cap should also apply their normal OS limit.
 The inspector may stop early to preserve allocation headroom rather than exhaust
-available memory. This ticket does not add the spill storage planned in ticket 14.
+available memory.
+
+### Large-file inspection and private storage
+
+Main-file reads use positional access with a bounded read buffer. Structural page
+evidence and snapshot-wide indexes share bounded caches and spill into a private
+temporary SQLite database. Whole-graph exports still require enough resident
+headroom to materialize their result; normal browser and terminal navigation uses
+revision metadata, page windows, and independently paged structural collections.
+Physical page numbers and schema-cell identities remain stable across windows.
+The browser provides a physical-page jump and window-size selector; the terminal
+uses `g` to jump and `</>` to page collections.
+Traversal headers are separate from prefix steps: open **Inspect prefix** in the
+browser's displayed traversal records, or enter a **Traversal** entry from a
+terminal page/cell. Prefix windows preserve traversal order, show their exact
+range and termination, and link directly to physical pages.
+
+`--page-cache-bytes` sets the shared structural cache estimate (default 8 MiB),
+and `--max-spill-bytes` caps the private spill database (default 8 GiB). Zero spill
+bytes disables spilling. These settings apply to both adapters and are separate
+from the process resident-memory ceiling. Half the cache allowance serves page
+evidence and half serves indexes. Cache accounting is conservative decoded-size
+accounting, not a measurement of allocator residency.
+
+The spill database is created with owner-only permissions in the system temporary
+directory and removed when the session and its readers are dropped. It contains
+structural evidence and schema declarations, not application payload values.
+Individual records spill at work boundaries; exhausting the file ceiling retains
+the accepted prefix and reports a storage-budget stop. SQLite rollback journals
+and filesystem overhead are additional to the reported database-file bytes.
+Intermediate index rows may remain until the session closes, so temporary space
+can exceed the size of the final published graph. Dense cell evidence can also
+occupy substantially more temporary space than the main file.
+
+Every collection query rechecks frozen input contents with an incremental BLAKE3
+fingerprint and a fixed 16 KiB read buffer. Navigation latency therefore
+depends on main-file size and storage throughput even when the requested collection
+is small. Lowering the collection window reduces retained evidence, but does not
+reduce content-verification reads. Complete, unsampled inspection remains subject
+to all configured cell, traversal, phase, schema, resident, and storage ceilings.
+
+The isolated-process benchmark runner records input geometry, exact coverage,
+effective budgets, scan and terminal-navigation times, peak process RSS, spill
+database bytes, and source/binary hashes. Fixture generation runs outside the
+measured inspector. Reproduce the extended profiles with:
+
+```sh
+python3 benchmarks/run_large.py --topology sparse --output benchmarks/ticket14-sparse.json
+python3 benchmarks/run_large.py --topology overflow --output benchmarks/ticket14-overflow.json
+python3 benchmarks/run_large.py --topology dense-indexed --sizes-mib 8 16 --output benchmarks/ticket14-dense-indexed.json
+```
+
+Sparse and overflow profiles default to 2/4 GiB files, a 64 MiB resident ceiling,
+and a 1 MiB cache. They explicitly raise cell and phase work budgets; their results
+do not promise completion under the default work ceilings. The dense indexed
+profile uses 64 KiB pages and full auto-vacuum to exercise large decoded pages,
+indexes, and pointer maps. `cargo test --test large_profile` runs the practical
+isolated-process memory-growth and allocation-stop regressions; larger benchmarks
+are intended for explicit runs.
+
+Measured on the development Linux host on 2026-09-10, all six release runs
+completed page inventory, topology, and schema inspection, with readable first/last
+pages and successful terminal navigation. Each used a 64 MiB resident ceiling and
+1 MiB cache. Sizes below are actual file sizes; generated overflow files include
+B-tree overhead beyond their requested payload size.
+
+| Topology | Input MiB | Pages | Scan seconds | Terminal navigation seconds | Peak RSS MiB | Spill MiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Sparse | 2,048 | 32,768 | 34.274 | 7.281 | 5.00 | 21.89 |
+| Sparse | 4,096 | 65,536 | 70.331 | 13.953 | 5.00 | 44.25 |
+| Overflow | 2,050.5 | 32,808 | 102.912 | 7.997 | 6.25 | 66.33 |
+| Overflow | 4,100.8125 | 65,613 | 194.546 | 13.074 | 5.00 | 134.91 |
+| Dense indexed, full auto-vacuum | 8.0625 | 129 | 14.568 | 0.035 | 16.95 | 288.95 |
+| Dense indexed, full auto-vacuum | 16 | 256 | 29.010 | 0.044 | 17.18 | 580.45 |
+
+Exact results and provenance are in [sparse](benchmarks/ticket14-sparse.json),
+[overflow](benchmarks/ticket14-overflow.json), and
+[dense indexed](benchmarks/ticket14-dense-indexed.json) reports. Scan time includes
+session creation and frozen-input verification. Terminal time includes initial
+view construction and a jump to the last page; peak RSS includes these queries.
+The reports also retain total elapsed time. They were recorded before committing:
+`sourceCommit` names the baseline and `workingTreeModified` is true. Their identical
+`sourceSha256` identifies the actual measured implementation and embedded assets;
+`sourceFiles` specifies the hash inputs. Documentation and result files are excluded.
+
+Doubling these inputs did not double resident memory. Sparse and overflow 2/4 GiB
+runs stayed at 5–6.25 MiB, while dense 8/16 MiB runs stayed below 18 MiB. This is an
+observed envelope for these topologies, not a guarantee for arbitrary databases or
+hosts. Dense evidence required about 36 times the input size in spill storage,
+which prevents extrapolating the multi-gigabyte sparse result to dense inputs.
+Multi-gigabyte terminal navigation took 7–14 seconds: bounded memory does not imply
+instant interaction when full-content verification is required. The earlier
+[baseline](benchmarks/ticket14-baseline.json) includes fixture creation and uses a
+debug build, so it is evidence of the previous memory ceiling, not a comparable
+throughput benchmark.
+
+The cache and process defaults serve different purposes. The large-file profiles
+exercise a 1 MiB cache under a 64 MiB process ceiling to demonstrate that neither
+must grow with main-file size. The 8 MiB default cache provides eight times that
+working allowance for repeated page/index access while remaining a small fraction
+of the existing 256 MiB process default. The latter leaves room for admitted dense
+page/pointer-map records, explicit deep targets, and adapter responses; it is not
+memory reserved for the main file. These are conservative headroom settings, not
+an experimentally optimal cache size or a promise that every target fits.
+
+Spill capacity must follow structural evidence density, not input size alone.
+The 8 GiB default is a finite allowance, more than 14 times the largest measured
+580.45 MiB spill file;
+users inspecting denser or larger graphs may need more temporary space or will
+receive an exact storage-budget stop. It does not imply that every 8 GiB database
+can be fully inspected. The reported spill bytes exclude rollback journals and
+filesystem overhead, so available disk space must exceed the database-file cap
+when that cap is approached.
 
 The browser's **Effective inspection budgets** and **Inspection work coverage**
 sections are shared by page atlas and schema flow. Terminal database/help evidence

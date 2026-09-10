@@ -1,5 +1,4 @@
 //! Allocation evidence is read before topology: freed leaves may contain stale B-trees.
-use std::collections::HashMap;
 use std::fs::File;
 use std::os::unix::fs::FileExt;
 
@@ -13,7 +12,7 @@ use super::{
     TraversalKind, TraversalStop, TraversalStopReason,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AllocationRole {
     FreelistTrunk,
@@ -21,14 +20,14 @@ pub enum AllocationRole {
     Conflicting,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FreelistField {
     pub value: u32,
     pub evidence: PhysicalEvidence,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FreelistTrunk {
     pub page: PageIdentity,
@@ -67,8 +66,6 @@ pub struct FreelistEvidence {
     pub declared_count: Option<FreelistField>,
     pub trunks: Vec<FreelistTrunk>,
     pub coverage: FreelistCoverage,
-    #[serde(skip)]
-    pub(super) page_overrides: HashMap<u32, PageEntity>,
 }
 
 impl FreelistEvidence {
@@ -77,7 +74,6 @@ impl FreelistEvidence {
             first_trunk: None,
             declared_count: None,
             trunks: Vec::new(),
-            page_overrides: HashMap::new(),
             coverage: FreelistCoverage {
                 reason: FreelistCoverageReason::NotInspected,
                 stopping_claim: None,
@@ -91,10 +87,10 @@ impl FreelistEvidence {
 struct Inspector<'a> {
     file: &'a File,
     geometry: &'a DatabaseGeometry,
-    pages: &'a [PageEntity],
+    pages: &'a super::storage::PageStore,
     control: &'a WorkControl,
     result: Topology,
-    incoming: HashMap<u32, usize>,
+    incoming: super::index_map::IndexMap<u32, usize>,
     prefix: Vec<PageIdentity>,
     stop: Option<TraversalStop>,
 }
@@ -102,7 +98,7 @@ struct Inspector<'a> {
 pub(super) fn inspect(
     file: &File,
     geometry: &DatabaseGeometry,
-    pages: &[PageEntity],
+    pages: &super::storage::PageStore,
     budget: TraversalBudget,
     control: &WorkControl,
 ) -> Topology {
@@ -111,8 +107,16 @@ pub(super) fn inspect(
         geometry,
         pages,
         control,
-        result: Topology::empty(budget),
-        incoming: HashMap::new(),
+        result: Topology {
+            page_overrides: super::index_map::IndexMap::new(std::sync::Arc::clone(&pages.context)),
+            freelist_trunks: super::index::Sequence::new(std::sync::Arc::clone(&pages.context)),
+            diagnostics: super::index::Sequence::new(std::sync::Arc::clone(&pages.context)),
+            claims: super::index::Sequence::new(std::sync::Arc::clone(&pages.context)),
+            relationships: super::index::Sequence::new(std::sync::Arc::clone(&pages.context)),
+            traversals: super::index::Sequence::new(std::sync::Arc::clone(&pages.context)),
+            ..Topology::empty(budget)
+        },
+        incoming: super::index_map::IndexMap::new(std::sync::Arc::clone(&pages.context)),
         prefix: Vec::new(),
         stop: None,
     };
@@ -135,7 +139,7 @@ impl Inspector<'_> {
                     file_offset,
                     length: 4,
                 },
-                validation_rule: rule,
+                validation_rule: std::borrow::Cow::Borrowed(rule),
             },
         })
     }
@@ -146,7 +150,13 @@ impl Inspector<'_> {
             "freelist_read_failed",
             TraversalStopReason::MissingTarget,
         );
-        self.result.claims[index].state = RelationshipState::Unresolved;
+        if !self
+            .result
+            .claims
+            .edit(index, |stored| stored.state = RelationshipState::Unresolved)
+        {
+            return;
+        }
         self.result.freelist.coverage.reason = FreelistCoverageReason::Unreadable;
         self.stop_at(index);
     }
@@ -191,39 +201,64 @@ impl Inspector<'_> {
         index
     }
 
-    fn run(&mut self, budget: TraversalBudget) {
-        self.control
-            .begin_phase(TopologyPhase::FreelistInspection, None);
+    fn read_header(&mut self) -> Option<FreelistField> {
         let Some(first) = self.field(1, 32, "sqlite_header_first_freelist_trunk") else {
             self.result.freelist.coverage.reason = FreelistCoverageReason::Unreadable;
-            return;
+            return None;
         };
         let Some(count) = self.field(1, 36, "sqlite_header_freelist_page_count") else {
             self.result.freelist.coverage.reason = FreelistCoverageReason::Unreadable;
-            return;
+            return None;
         };
         self.result.freelist.first_trunk = Some(first.clone());
         self.result.freelist.declared_count = Some(count);
         self.result.freelist.coverage.reason = FreelistCoverageReason::Complete;
+        Some(first)
+    }
+
+    fn stop_for_trunk_budget(&mut self, index: usize) -> bool {
+        if (self.prefix.len() as u64) < self.control.freelist_limit() {
+            return false;
+        }
+        self.control
+            .mark_local_budget(super::BudgetKind::FreelistTrunks);
+        self.result.claims.edit(index, |claim| {
+            claim.stop_reason = Some(TraversalStopReason::Budget);
+        });
+        self.result.freelist.coverage.reason = FreelistCoverageReason::Budget;
+        self.stop_at(index);
+        true
+    }
+
+    fn run(&mut self, budget: TraversalBudget) {
+        self.control
+            .begin_phase(TopologyPhase::FreelistInspection, None);
+        let Some(first) = self.read_header() else {
+            return;
+        };
         let mut index = self.claim(&first, RelationshipKind::FreelistTrunk);
-        'trunks: while self.result.claims[index].target.is_some() {
-            if self.prefix.len() as u64 >= self.control.freelist_limit() {
-                self.control
-                    .mark_local_budget(super::BudgetKind::FreelistTrunks);
-                self.result.claims[index].stop_reason = Some(TraversalStopReason::Budget);
-                self.result.freelist.coverage.reason = FreelistCoverageReason::Budget;
-                self.stop_at(index);
+        'trunks: while (match self.result.claims.get(index) {
+            Some(claim) => claim,
+            None => return,
+        })
+        .target
+        .is_some()
+        {
+            if self.stop_for_trunk_budget(index) {
                 break;
             }
             if !self.validate(index, AllocationRole::FreelistTrunk, budget) {
                 self.stop_at(index);
                 break;
             }
-            let page = self.result.claims[index]
-                .target
-                .as_ref()
-                .unwrap()
-                .page_number;
+            let page = (match self.result.claims.get(index) {
+                Some(claim) => claim,
+                None => return,
+            })
+            .target
+            .as_ref()
+            .unwrap()
+            .page_number;
             self.prefix.push(PageIdentity { page_number: page });
             let Some(next) = self.required_field(page, 0, "sqlite_freelist_next_trunk", index)
             else {
@@ -234,7 +269,7 @@ impl Inspector<'_> {
                 break;
             };
             let capacity = self.geometry.usable_size / 4 - 2;
-            self.result.freelist.trunks.push(FreelistTrunk {
+            self.result.freelist_trunks.push(FreelistTrunk {
                 page: PageIdentity { page_number: page },
                 leaf_count: count.clone(),
                 capacity,
@@ -247,19 +282,14 @@ impl Inspector<'_> {
                     "freelist_leaf_count_exceeds_capacity",
                     TraversalStopReason::InvalidReference,
                 );
-                self.result
-                    .diagnostics
-                    .last_mut()
-                    .unwrap()
-                    .evidence
-                    .push(count.evidence.clone());
-                self.result
-                    .freelist
-                    .page_overrides
-                    .get_mut(&page)
-                    .unwrap()
-                    .detail
-                    .coverage = LocalCoverage::Partial;
+                let Some(mut diagnostic) = self.result.diagnostics.last_mut() else {
+                    return;
+                };
+                diagnostic.evidence.push(count.evidence.clone());
+                drop(diagnostic);
+                if let Some(mut stored) = self.result.page_overrides.get_mut(&page) {
+                    stored.detail.coverage = LocalCoverage::Partial;
+                }
                 self.stop_at(next_index);
                 break;
             }
@@ -276,7 +306,11 @@ impl Inspector<'_> {
                 let leaf_index = self.claim(&field, RelationshipKind::FreelistLeaf);
                 if !self.validate(leaf_index, AllocationRole::FreelistLeaf, budget)
                     && matches!(
-                        self.result.claims[leaf_index].stop_reason,
+                        (match self.result.claims.get(leaf_index) {
+                            Some(claim) => claim,
+                            None => return,
+                        })
+                        .stop_reason,
                         Some(
                             TraversalStopReason::Budget
                                 | TraversalStopReason::Cancelled
@@ -299,17 +333,32 @@ impl Inspector<'_> {
             && declared.value != self.result.freelist.coverage.evaluated_pages
         {
             self.result.diagnostics.push(StructuralDiagnostic {
-                code: "freelist_total_mismatch",
+                code: std::borrow::Cow::Borrowed("freelist_total_mismatch"),
                 severity: DiagnosticSeverity::Error,
                 evidence: vec![first.evidence.clone(), declared.evidence.clone()],
-                affected_relationships: vec![self.result.claims[0].id.clone()],
+                affected_relationships: vec![
+                    (match self.result.claims.get(0) {
+                        Some(claim) => claim,
+                        None => return,
+                    })
+                    .id
+                    .clone(),
+                ],
                 containment: Containment::RelationshipExcluded,
             });
             self.result.freelist.coverage.reason = FreelistCoverageReason::InvalidStructure;
         }
         for position in 0..self.prefix.len() {
-            let incoming = self.incoming[&self.prefix[position].page_number];
-            if self.result.claims[incoming].state != RelationshipState::Validated {
+            let Some(incoming) = self.incoming.get(&self.prefix[position].page_number) else {
+                return;
+            };
+            if (match self.result.claims.get(incoming) {
+                Some(claim) => claim,
+                None => return,
+            })
+            .state
+                != RelationshipState::Validated
+            {
                 self.prefix.truncate(position);
                 self.stop_at(incoming);
                 break;
@@ -348,21 +397,17 @@ impl Inspector<'_> {
 
     fn trunk_regions(&mut self, page: u32, count: u32) {
         let end = 8 + count * 4;
-        let regions = &mut self
-            .result
-            .freelist
-            .page_overrides
-            .get_mut(&page)
-            .unwrap()
-            .detail
-            .regions;
+        let Some(mut stored) = self.result.page_overrides.get_mut(&page) else {
+            return;
+        };
+        let regions = &mut stored.detail.regions;
         for (kind, start, length) in [
             ("freelist_header", 0, 8),
             ("freelist_leaf_pointers", 8, count * 4),
             ("freelist_unused", end, self.geometry.usable_size - end),
         ] {
             regions.push(super::btree::Region {
-                kind,
+                kind: std::borrow::Cow::Borrowed(kind),
                 range: ByteRange {
                     page_offset: start,
                     file_offset: u64::from(page - 1) * u64::from(self.geometry.page_size)
@@ -373,25 +418,43 @@ impl Inspector<'_> {
         }
     }
 
-    fn validate(&mut self, index: usize, role: AllocationRole, budget: TraversalBudget) -> bool {
-        let target = self.result.claims[index]
+    fn validate_reference(
+        &mut self,
+        index: usize,
+        role: AllocationRole,
+        budget: TraversalBudget,
+    ) -> Option<u32> {
+        let target = self
+            .result
+            .claims
+            .get(index)?
             .target
             .as_ref()
             .map_or(0, |p| p.page_number);
         if let Some(reason) = self.control.traversal_reason() {
-            self.result.claims[index].stop_reason = Some(reason);
+            if !self
+                .result
+                .claims
+                .edit(index, |stored| stored.stop_reason = Some(reason))
+            {
+                return None;
+            }
             self.result.freelist.coverage.reason = match reason {
                 TraversalStopReason::Cancelled => FreelistCoverageReason::Cancelled,
                 TraversalStopReason::Budget => FreelistCoverageReason::Budget,
                 _ => FreelistCoverageReason::OperatorStop,
             };
-            return false;
+            return None;
         }
         if u64::from(self.result.freelist.coverage.evaluated_pages) >= budget.max_total_pages() {
             self.control.mark_aggregate_budget_exhausted();
-            self.result.claims[index].stop_reason = Some(TraversalStopReason::Budget);
+            if !self.result.claims.edit(index, |stored| {
+                stored.stop_reason = Some(TraversalStopReason::Budget);
+            }) {
+                return None;
+            }
             self.result.freelist.coverage.reason = FreelistCoverageReason::Budget;
-            return false;
+            return None;
         }
         if target <= 1 {
             self.fail(
@@ -399,7 +462,7 @@ impl Inspector<'_> {
                 "freelist_invalid_page",
                 TraversalStopReason::InvalidReference,
             );
-            return false;
+            return None;
         }
         if target > self.geometry.page_count {
             self.fail(
@@ -407,8 +470,14 @@ impl Inspector<'_> {
                 "freelist_page_out_of_range",
                 TraversalStopReason::OutOfRange,
             );
-            self.result.claims[index].state = RelationshipState::Unresolved;
-            return false;
+            if !self
+                .result
+                .claims
+                .edit(index, |stored| stored.state = RelationshipState::Unresolved)
+            {
+                return None;
+            }
+            return None;
         }
         if super::roles::reserved_role(self.geometry, target).is_some() {
             self.fail(
@@ -416,30 +485,46 @@ impl Inspector<'_> {
                 "freelist_reserved_page_conflict",
                 TraversalStopReason::ConflictingClaim,
             );
-            self.result.claims[index].state = RelationshipState::Conflicting;
-            return false;
+            if !self.result.claims.edit(index, |stored| {
+                stored.state = RelationshipState::Conflicting;
+            }) {
+                return None;
+            }
+            return None;
         }
-        if let Some(previous) = self.incoming.get(&target).copied() {
+        if let Some(previous) = self.incoming.get(&target) {
             self.repeated_claim(index, role, target, previous);
-            return false;
+            return None;
         }
+        Some(target)
+    }
+
+    fn validate(&mut self, index: usize, role: AllocationRole, budget: TraversalBudget) -> bool {
+        let Some(target) = self.validate_reference(index, role, budget) else {
+            return false;
+        };
         let Some(page) = self.pages.get((target - 1) as usize) else {
-            self.result
-                .freelist
-                .coverage
-                .stopping_claim
-                .get_or_insert_with(|| self.result.claims[index].id.clone());
-            self.result.claims[index].stop_reason = Some(TraversalStopReason::CoverageStop);
+            self.result.freelist.coverage.stopping_claim.get_or_insert(
+                match self.result.claims.get(index) {
+                    Some(claim) => claim.id,
+                    None => return false,
+                },
+            );
+            if !self.result.claims.edit(index, |stored| {
+                stored.stop_reason = Some(TraversalStopReason::CoverageStop);
+            }) {
+                return false;
+            }
             self.result.freelist.coverage.reason = FreelistCoverageReason::CoverageStop;
             return false;
         };
-        if page.detail.diagnostics.contains(&"page_read_failed") {
+        if page.detail.diagnostics.contains(&"page_read_failed".into()) {
             self.read_failure(index);
             return false;
         }
         // Preserve the original inventory without copying its cells. Only allocation
         // pages receive a structural projection with stale contents withheld.
-        self.result.freelist.page_overrides.insert(
+        self.result.page_overrides.insert(
             target,
             PageEntity {
                 number: target,
@@ -455,7 +540,9 @@ impl Inspector<'_> {
                         .detail
                         .regions
                         .iter()
-                        .filter(|region| matches!(region.kind, "usable_space" | "opaque_reserved"))
+                        .filter(|region| {
+                            matches!(region.kind.as_ref(), "usable_space" | "opaque_reserved")
+                        })
                         .cloned()
                         .collect(),
                     coverage: LocalCoverage::Complete,
@@ -463,7 +550,13 @@ impl Inspector<'_> {
             },
         );
         self.incoming.insert(target, index);
-        self.result.claims[index].state = RelationshipState::Validated;
+        if !self
+            .result
+            .claims
+            .edit(index, |stored| stored.state = RelationshipState::Validated)
+        {
+            return false;
+        }
         self.result.freelist.coverage.evaluated_pages += 1;
         self.control.advance(TopologyPhase::FreelistInspection);
         true
@@ -471,7 +564,12 @@ impl Inspector<'_> {
 
     fn repeated_claim(&mut self, index: usize, role: AllocationRole, target: u32, previous: usize) {
         let cycle = role == AllocationRole::FreelistTrunk
-            && self.result.claims[previous].kind == RelationshipKind::FreelistTrunk;
+            && (match self.result.claims.get(previous) {
+                Some(claim) => claim,
+                None => return,
+            })
+            .kind
+                == RelationshipKind::FreelistTrunk;
         let reason = if cycle {
             TraversalStopReason::Cycle
         } else {
@@ -486,45 +584,55 @@ impl Inspector<'_> {
             },
             reason,
         );
-        self.result.claims[index].state = RelationshipState::Conflicting;
-        if !cycle {
-            self.result.claims[previous].state = RelationshipState::Conflicting;
-            self.result.claims[previous].stop_reason = Some(reason);
-            self.result
-                .freelist
-                .page_overrides
-                .get_mut(&target)
-                .unwrap()
-                .detail
-                .allocation_role = Some(AllocationRole::Conflicting);
-            self.result
-                .freelist
-                .page_overrides
-                .get_mut(&target)
-                .unwrap()
-                .detail
-                .coverage = LocalCoverage::Partial;
+        if !self.result.claims.edit(index, |stored| {
+            stored.state = RelationshipState::Conflicting;
+        }) {
+            return;
         }
-        let prior = &self.result.claims[previous];
-        let diagnostic = self.result.diagnostics.last_mut().unwrap();
+        if !cycle {
+            if !self.result.claims.edit(previous, |stored| {
+                stored.state = RelationshipState::Conflicting;
+            }) {
+                return;
+            }
+            if !self
+                .result
+                .claims
+                .edit(previous, |stored| stored.stop_reason = Some(reason))
+            {
+                return;
+            }
+            if let Some(mut stored) = self.result.page_overrides.get_mut(&target) {
+                stored.detail.allocation_role = Some(AllocationRole::Conflicting);
+                stored.detail.coverage = LocalCoverage::Partial;
+            }
+        }
+        let prior = &(match self.result.claims.get(previous) {
+            Some(claim) => claim,
+            None => return,
+        });
+        let Some(mut diagnostic) = self.result.diagnostics.last_mut() else {
+            return;
+        };
         diagnostic.evidence.push(prior.evidence.clone());
         diagnostic.affected_relationships.push(prior.id.clone());
     }
 
     fn fail(&mut self, index: usize, code: &'static str, reason: TraversalStopReason) {
-        let claim = &mut self.result.claims[index];
+        let Some(mut claim) = self.result.claims.get_mut(index) else {
+            return;
+        };
         claim.state = RelationshipState::Invalid;
         claim.stop_reason = Some(reason);
         self.result.diagnostics.push(StructuralDiagnostic {
-            code,
+            code: std::borrow::Cow::Borrowed(code),
             severity: DiagnosticSeverity::Error,
             evidence: vec![claim.evidence.clone()],
             affected_relationships: vec![claim.id.clone()],
             containment: Containment::TraversalStopped,
         });
-        if let Some(page) = self
+        if let Some(mut page) = self
             .result
-            .freelist
             .page_overrides
             .get_mut(&claim.evidence.page.page_number)
         {
@@ -539,7 +647,10 @@ impl Inspector<'_> {
     }
 
     fn stop_at(&mut self, index: usize) {
-        let claim = &self.result.claims[index];
+        let claim = &(match self.result.claims.get(index) {
+            Some(claim) => claim,
+            None => return,
+        });
         self.result.freelist.coverage.stopping_claim = Some(claim.id.clone());
         self.stop = Some(TraversalStop {
             reason: claim
@@ -554,57 +665,67 @@ impl Inspector<'_> {
 /// An incoming storage pointer is independent evidence; a stale local type byte is not.
 pub(super) fn reconcile_storage(
     allocation: &mut Topology,
-    storage: &mut [RelationshipClaim],
-    traversals: &mut [Traversal],
+    storage: &mut super::index::Sequence<RelationshipClaim>,
+    traversals: &mut super::index::Sequence<Traversal>,
     control: &WorkControl,
 ) {
     control.begin_phase(TopologyPhase::AllocationReconciliation, None);
-    let mut incoming = HashMap::<u32, Vec<usize>>::new();
-    for (index, claim) in allocation.claims.iter().enumerate() {
-        if control.traversal_reason().is_some() {
+    let Some(incoming) = super::topology::index_claim_targets(
+        &allocation.claims,
+        control,
+        TopologyPhase::AllocationReconciliation,
+    ) else {
+        return;
+    };
+    let mut conflicts = allocation.claims.map();
+    for position in 0..storage.len() {
+        let Some(mut claim) = storage.get_mut(position) else {
             return;
-        }
-        control.advance(TopologyPhase::AllocationReconciliation);
-        if let Some(target) = &claim.target {
-            incoming.entry(target.page_number).or_default().push(index);
-        }
-    }
-    let mut conflicts = std::collections::HashSet::new();
-    for claim in storage {
+        };
         if control.traversal_reason().is_some() {
             break;
         }
         control.advance(TopologyPhase::AllocationReconciliation);
-        let Some(target) = &claim.target else {
+        let Some(target) = claim.target.clone() else {
             continue;
         };
-        let Some(page) = allocation
-            .freelist
-            .page_overrides
-            .get_mut(&target.page_number)
-        else {
+        let Some(mut page) = allocation.page_overrides.get_mut(&target.page_number) else {
             continue;
         };
         if claim.stop_reason != Some(TraversalStopReason::TypeMismatch) {
             continue;
         }
+        let indexes = control
+            .read_index(&incoming, &target.page_number)
+            .unwrap_or_default();
+        if control.traversal_reason().is_some()
+            || !control.reserve_memory(
+                (indexes.len() as u64)
+                    .saturating_add(1)
+                    .saturating_mul(2048),
+            )
+        {
+            return;
+        }
         claim.state = RelationshipState::Conflicting;
         claim.stop_reason = Some(TraversalStopReason::ConflictingClaim);
-        conflicts.insert(claim.id.clone());
+        conflicts.insert(claim.id.clone(), ());
         page.detail.allocation_role = Some(AllocationRole::Conflicting);
         page.detail.coverage = LocalCoverage::Partial;
         let mut evidence = vec![claim.evidence.clone()];
         let mut affected = vec![claim.id.clone()];
-        for index in &incoming[&target.page_number] {
-            let free = &mut allocation.claims[*index];
+        for index in &indexes {
+            let Some(mut free) = allocation.claims.get_mut(*index) else {
+                return;
+            };
             free.state = RelationshipState::Conflicting;
             free.stop_reason = Some(TraversalStopReason::ConflictingClaim);
-            conflicts.insert(free.id.clone());
+            conflicts.insert(free.id.clone(), ());
             evidence.push(free.evidence.clone());
             affected.push(free.id.clone());
         }
         allocation.diagnostics.push(StructuralDiagnostic {
-            code: "freelist_storage_role_conflict",
+            code: std::borrow::Cow::Borrowed("freelist_storage_role_conflict"),
             severity: DiagnosticSeverity::Error,
             evidence,
             affected_relationships: affected,
@@ -615,24 +736,65 @@ pub(super) fn reconcile_storage(
             allocation.freelist.coverage.remainder = None;
         }
     }
-    allocation
-        .relationships
-        .retain(|relationship| !conflicts.contains(&relationship.claim_id));
-    for traversal in traversals {
+    allocation.relationships.retain(
+        |relationship| !conflicts.contains_key(&relationship.claim_id),
+        || control.traversal_reason().is_none(),
+    );
+    reconcile_traversal_stops(allocation, traversals, &incoming, &conflicts, control);
+    if control.traversal_reason().is_none() {
+        control.finish_phase(TopologyPhase::AllocationReconciliation);
+    }
+}
+
+fn reconcile_traversal_stops(
+    allocation: &mut Topology,
+    traversals: &mut super::index::Sequence<Traversal>,
+    incoming: &super::index_map::IndexMap<u32, Vec<usize>>,
+    conflicts: &super::index_map::IndexMap<String, ()>,
+    control: &WorkControl,
+) {
+    for position in 0..traversals.len() {
+        if control.traversal_reason().is_some() {
+            return;
+        }
+        let Some(mut traversal) = traversals.get_mut(position) else {
+            return;
+        };
         if let Some(stop) = &mut traversal.stop
-            && conflicts.contains(&stop.claim_id)
+            && conflicts.contains_key(&stop.claim_id)
         {
             stop.reason = TraversalStopReason::ConflictingClaim;
         }
     }
-    for traversal in &mut allocation.traversals {
+    for position in 0..allocation.traversals.len() {
+        if control.traversal_reason().is_some() {
+            return;
+        }
+        let Some(mut traversal) = allocation.traversals.get_mut(position) else {
+            return;
+        };
         if let Some(position) = traversal.validated_prefix.iter().position(|page| {
-            incoming[&page.page_number]
+            control
+                .read_index(incoming, &page.page_number)
+                .unwrap_or_default()
                 .iter()
-                .any(|index| conflicts.contains(&allocation.claims[*index].id))
+                .any(|index| {
+                    allocation
+                        .claims
+                        .get(*index)
+                        .is_some_and(|claim| conflicts.contains_key(&claim.id))
+                })
         }) {
             let page = traversal.validated_prefix[position].page_number;
-            let claim = &allocation.claims[incoming[&page][0]];
+            let Some(index) = incoming
+                .get(&page)
+                .and_then(|indexes| indexes.first().copied())
+            else {
+                return;
+            };
+            let Some(claim) = allocation.claims.get(index) else {
+                return;
+            };
             traversal.validated_prefix.truncate(position);
             traversal.stop = Some(TraversalStop {
                 reason: TraversalStopReason::ConflictingClaim,
@@ -641,8 +803,5 @@ pub(super) fn reconcile_storage(
             });
             allocation.freelist.coverage.stopping_claim = Some(claim.id.clone());
         }
-    }
-    if control.traversal_reason().is_none() {
-        control.finish_phase(TopologyPhase::AllocationReconciliation);
     }
 }

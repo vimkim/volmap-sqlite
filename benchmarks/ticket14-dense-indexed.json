@@ -1,0 +1,577 @@
+{
+  "sourceSha256": "e3991f700f5a3b5b818ebefd803e9c7cb6452cf58c6cf5e5c0e92df14ba5b897",
+  "sourceFiles": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "benchmarks/probe.rs",
+    "benchmarks/run_large.py",
+    "examples/budget_probe.rs",
+    "examples/large_probe.rs",
+    "frontend/dist/assets/app.css",
+    "frontend/dist/assets/app.js",
+    "frontend/dist/index.html",
+    "src/inspection/btree.rs",
+    "src/inspection/budget.rs",
+    "src/inspection/deep.rs",
+    "src/inspection/freelist.rs",
+    "src/inspection/index/pages.rs",
+    "src/inspection/index/traversals.rs",
+    "src/inspection/index.rs",
+    "src/inspection/index_map.rs",
+    "src/inspection/metadata.rs",
+    "src/inspection/pointer_map.rs",
+    "src/inspection/roles.rs",
+    "src/inspection/schema.rs",
+    "src/inspection/session/collections.rs",
+    "src/inspection/session/deep.rs",
+    "src/inspection/session/metadata.rs",
+    "src/inspection/session/page_collections.rs",
+    "src/inspection/session/schema.rs",
+    "src/inspection/session/traversals.rs",
+    "src/inspection/session.rs",
+    "src/inspection/sidecar/journal.rs",
+    "src/inspection/sidecar/shm.rs",
+    "src/inspection/sidecar/wal.rs",
+    "src/inspection/sidecar.rs",
+    "src/inspection/storage.rs",
+    "src/inspection/topology.rs",
+    "src/inspection.rs",
+    "src/lib.rs",
+    "src/main.rs",
+    "src/semantic.rs",
+    "src/terminal/deep.rs",
+    "src/terminal/evidence.rs",
+    "src/terminal/navigation.rs",
+    "src/terminal/runtime.rs",
+    "src/terminal/window.rs",
+    "src/terminal.rs",
+    "src/web/listener.rs",
+    "src/web/security.rs",
+    "src/web.rs"
+  ],
+  "sourceCommit": "9c73e11592956ce4f0012262829d3345c4337e56",
+  "workingTreeModified": true,
+  "recordedAt": "2026-09-10T12:43:26.120928+00:00",
+  "profile": "release",
+  "topology": "dense-indexed",
+  "method": "Fixture creation and inspection run in separate processes; RSS is inspector VmHWM.",
+  "runs": [
+    {
+      "elapsedMs": 14618,
+      "evaluatedPages": 129,
+      "firstPage": 1,
+      "firstPageError": null,
+      "inputBytes": 8454144,
+      "lastPage": 129,
+      "lastPageError": null,
+      "operationalBudget": {
+        "maxFreelistTrunks": 32768,
+        "maxPhaseUnits": 18446744073709551615,
+        "maxProcessedCells": 18446744073709551615,
+        "maxResidentBytes": 67108864
+      },
+      "pageSize": 65536,
+      "peakResidentBytes": 17772544,
+      "scanMs": 14568,
+      "storage": {
+        "cacheBytes": 725940,
+        "inventoryBytes": 1209679360,
+        "maxPageBytes": 12983616,
+        "spillBytes": 302989312,
+        "spilled": true,
+        "spilledIndexes": 13,
+        "storedPages": 129
+      },
+      "storageBudget": {
+        "cacheBytes": 1048576,
+        "maxSpillBytes": 8589934592
+      },
+      "summary": {
+        "claimCount": 126,
+        "coverage": {
+          "evaluated": 129,
+          "nextPage": null,
+          "reason": "complete",
+          "remainder": 0,
+          "scope": "page_inventory",
+          "total": 129
+        },
+        "diagnosticCount": 0,
+        "freelistTrunkCount": 0,
+        "pageCount": 129,
+        "pointerMapPageCount": 1,
+        "relationshipCount": 125,
+        "revision": 1,
+        "schemaObjectCount": 2,
+        "schemaState": "complete",
+        "snapshot": {
+          "geometry": {
+            "declaredPageCount": 129,
+            "fileLength": 8454144,
+            "incrementalVacuum": 0,
+            "largestRootPage": 4,
+            "pageCount": 129,
+            "pageSize": 65536,
+            "reservedBytes": 0,
+            "schemaFormat": 4,
+            "textEncoding": "utf8",
+            "usableSize": 65536
+          },
+          "id": "c83e9f83-ebc1-4cc9-902e-567d87287179",
+          "source": {
+            "displayName": "generated.sqlite",
+            "id": "aed90c9b-1b68-4932-b5ce-4020e7f74994"
+          }
+        },
+        "topologyCoverage": {
+          "evaluated": 0,
+          "next": null,
+          "nextPhase": null,
+          "phase": "complete",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 0,
+          "traversalBudget": {
+            "maxBtreePages": 256,
+            "maxOverflowPages": 1000000,
+            "maxTotalPages": "16000000"
+          }
+        },
+        "traversalCount": 126
+      },
+      "terminalNavigation": {
+        "available": true,
+        "elapsedMs": 35,
+        "page": 129
+      },
+      "traversalBudget": {
+        "maxBtreePages": 256,
+        "maxOverflowPages": 1000000,
+        "maxTotalPages": "16000000"
+      },
+      "workCoverage": [
+        {
+          "evaluated": 0,
+          "limit": null,
+          "next": null,
+          "phase": "freelist_inspection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 0
+        },
+        {
+          "evaluated": 129,
+          "limit": null,
+          "next": null,
+          "phase": "btree_claim_collection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 129
+        },
+        {
+          "evaluated": 125,
+          "limit": null,
+          "next": null,
+          "phase": "btree_claim_validation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 125
+        },
+        {
+          "evaluated": 255,
+          "limit": null,
+          "next": null,
+          "phase": "btree_parent_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 255
+        },
+        {
+          "evaluated": 637,
+          "limit": null,
+          "next": null,
+          "phase": "btree_cycle_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 637
+        },
+        {
+          "evaluated": 125,
+          "limit": null,
+          "next": null,
+          "phase": "btree_relationship_normalization",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 125
+        },
+        {
+          "evaluated": 253,
+          "limit": null,
+          "next": null,
+          "phase": "btree_traversal",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 253
+        },
+        {
+          "evaluated": 129,
+          "limit": null,
+          "next": null,
+          "phase": "overflow_inspection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 129
+        },
+        {
+          "evaluated": 671801,
+          "limit": null,
+          "next": null,
+          "phase": "overflow_inspection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 671801
+        },
+        {
+          "evaluated": 0,
+          "limit": null,
+          "next": null,
+          "phase": "overflow_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 0
+        },
+        {
+          "evaluated": 0,
+          "limit": null,
+          "next": null,
+          "phase": "overflow_relationship_normalization",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 0
+        },
+        {
+          "evaluated": 126,
+          "limit": null,
+          "next": null,
+          "phase": "allocation_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 126
+        },
+        {
+          "evaluated": 129,
+          "limit": null,
+          "next": null,
+          "phase": "pointer_map_inspection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 129
+        },
+        {
+          "evaluated": 127,
+          "limit": null,
+          "next": null,
+          "phase": "pointer_map_validation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 127
+        },
+        {
+          "evaluated": 378,
+          "limit": null,
+          "next": null,
+          "phase": "pointer_map_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 378
+        },
+        {
+          "evaluated": 3173,
+          "limit": null,
+          "next": null,
+          "phase": "role_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 3173
+        },
+        {
+          "evaluated": 0,
+          "limit": null,
+          "next": null,
+          "phase": "complete",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 0
+        },
+        {
+          "evaluated": 889,
+          "limit": null,
+          "next": null,
+          "phase": "schema_inspection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 889
+        }
+      ]
+    },
+    {
+      "elapsedMs": 29070,
+      "evaluatedPages": 256,
+      "firstPage": 1,
+      "firstPageError": null,
+      "inputBytes": 16777216,
+      "lastPage": 256,
+      "lastPageError": null,
+      "operationalBudget": {
+        "maxFreelistTrunks": 32768,
+        "maxPhaseUnits": 18446744073709551615,
+        "maxProcessedCells": 18446744073709551615,
+        "maxResidentBytes": 67108864
+      },
+      "pageSize": 65536,
+      "peakResidentBytes": 18010112,
+      "scanMs": 29010,
+      "storage": {
+        "cacheBytes": 990008,
+        "inventoryBytes": 2429469144,
+        "maxPageBytes": 12983616,
+        "spillBytes": 608641024,
+        "spilled": true,
+        "spilledIndexes": 23,
+        "storedPages": 256
+      },
+      "storageBudget": {
+        "cacheBytes": 1048576,
+        "maxSpillBytes": 8589934592
+      },
+      "summary": {
+        "claimCount": 253,
+        "coverage": {
+          "evaluated": 256,
+          "nextPage": null,
+          "reason": "complete",
+          "remainder": 0,
+          "scope": "page_inventory",
+          "total": 256
+        },
+        "diagnosticCount": 0,
+        "freelistTrunkCount": 0,
+        "pageCount": 256,
+        "pointerMapPageCount": 1,
+        "relationshipCount": 252,
+        "revision": 1,
+        "schemaObjectCount": 2,
+        "schemaState": "complete",
+        "snapshot": {
+          "geometry": {
+            "declaredPageCount": 256,
+            "fileLength": 16777216,
+            "incrementalVacuum": 0,
+            "largestRootPage": 4,
+            "pageCount": 256,
+            "pageSize": 65536,
+            "reservedBytes": 0,
+            "schemaFormat": 4,
+            "textEncoding": "utf8",
+            "usableSize": 65536
+          },
+          "id": "624e42a4-acb5-482c-9830-ef569e585ce0",
+          "source": {
+            "displayName": "generated.sqlite",
+            "id": "54f6d589-60d1-4a8f-a709-c45493e93d65"
+          }
+        },
+        "topologyCoverage": {
+          "evaluated": 0,
+          "next": null,
+          "nextPhase": null,
+          "phase": "complete",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 0,
+          "traversalBudget": {
+            "maxBtreePages": 256,
+            "maxOverflowPages": 1000000,
+            "maxTotalPages": "16000000"
+          }
+        },
+        "traversalCount": 253
+      },
+      "terminalNavigation": {
+        "available": true,
+        "elapsedMs": 44,
+        "page": 256
+      },
+      "traversalBudget": {
+        "maxBtreePages": 256,
+        "maxOverflowPages": 1000000,
+        "maxTotalPages": "16000000"
+      },
+      "workCoverage": [
+        {
+          "evaluated": 0,
+          "limit": null,
+          "next": null,
+          "phase": "freelist_inspection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 0
+        },
+        {
+          "evaluated": 256,
+          "limit": null,
+          "next": null,
+          "phase": "btree_claim_collection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 256
+        },
+        {
+          "evaluated": 252,
+          "limit": null,
+          "next": null,
+          "phase": "btree_claim_validation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 252
+        },
+        {
+          "evaluated": 509,
+          "limit": null,
+          "next": null,
+          "phase": "btree_parent_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 509
+        },
+        {
+          "evaluated": 1272,
+          "limit": null,
+          "next": null,
+          "phase": "btree_cycle_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 1272
+        },
+        {
+          "evaluated": 252,
+          "limit": null,
+          "next": null,
+          "phase": "btree_relationship_normalization",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 252
+        },
+        {
+          "evaluated": 507,
+          "limit": null,
+          "next": null,
+          "phase": "btree_traversal",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 507
+        },
+        {
+          "evaluated": 256,
+          "limit": null,
+          "next": null,
+          "phase": "overflow_inspection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 256
+        },
+        {
+          "evaluated": 1343602,
+          "limit": null,
+          "next": null,
+          "phase": "overflow_inspection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 1343602
+        },
+        {
+          "evaluated": 0,
+          "limit": null,
+          "next": null,
+          "phase": "overflow_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 0
+        },
+        {
+          "evaluated": 0,
+          "limit": null,
+          "next": null,
+          "phase": "overflow_relationship_normalization",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 0
+        },
+        {
+          "evaluated": 253,
+          "limit": null,
+          "next": null,
+          "phase": "allocation_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 253
+        },
+        {
+          "evaluated": 256,
+          "limit": null,
+          "next": null,
+          "phase": "pointer_map_inspection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 256
+        },
+        {
+          "evaluated": 254,
+          "limit": null,
+          "next": null,
+          "phase": "pointer_map_validation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 254
+        },
+        {
+          "evaluated": 759,
+          "limit": null,
+          "next": null,
+          "phase": "pointer_map_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 759
+        },
+        {
+          "evaluated": 6348,
+          "limit": null,
+          "next": null,
+          "phase": "role_reconciliation",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 6348
+        },
+        {
+          "evaluated": 0,
+          "limit": null,
+          "next": null,
+          "phase": "complete",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 0
+        },
+        {
+          "evaluated": 1778,
+          "limit": null,
+          "next": null,
+          "phase": "schema_inspection",
+          "reason": "complete",
+          "remainder": 0,
+          "total": 1778
+        }
+      ]
+    }
+  ],
+  "binarySha256": "e17cf7443e134ac73b47992d91b10ee02fcc96ca04f2323b8dd63e75bfed04ab"
+}

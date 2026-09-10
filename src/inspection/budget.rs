@@ -41,3 +41,20 @@ pub(super) fn resident_bytes() -> Option<u64> {
         .ok()?
         .checked_mul(1024)
 }
+
+/// Count serialized bytes without allocating an intermediate JSON document.
+pub(super) fn serialized_reservation(value: &impl Serialize) -> Option<u64> {
+    struct Counter(u64);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len() as u64);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).ok()?;
+    Some(counter.0.saturating_mul(4))
+}

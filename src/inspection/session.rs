@@ -1,4 +1,9 @@
+mod collections;
 mod deep;
+mod metadata;
+mod page_collections;
+mod schema;
+mod traversals;
 pub use deep::{DeepJob, DeepLimits};
 
 use std::fs::{self, File, Metadata};
@@ -9,7 +14,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::{
@@ -46,6 +50,8 @@ pub enum CoverageReason {
     AllocationFailure,
     CellBudget,
     ResidentMemoryBudget,
+    StorageBudget,
+    StorageFailure,
 }
 
 /// Coverage is explicitly limited to page inventory; later structural passes have their own scope.
@@ -77,6 +83,8 @@ pub struct Progress {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStatus {
+    pub storage_budget: super::StorageBudget,
+    pub storage: super::StorageStatus,
     pub operational_budget: super::OperationalBudget,
     pub work_progress: Option<super::WorkProgress>,
     pub work_coverage: Vec<super::WorkProgress>,
@@ -223,7 +231,7 @@ fn digest(path: &Path, length: u64, cancelled: &AtomicBool) -> io::Result<Option
             "inspection inputs must be regular files",
         ));
     }
-    let mut hash = Sha256::new();
+    let mut hash = blake3::Hasher::new();
     // Never chase a growing file's EOF. A later metadata comparison detects growth.
     let mut file = file.take(length);
     let mut buffer = [0_u8; 16_384];
@@ -243,7 +251,7 @@ fn digest(path: &Path, length: u64, cancelled: &AtomicBool) -> io::Result<Option
         }
         hash.update(&buffer[..read]);
     }
-    Ok(Some(hash.finalize().into()))
+    Ok(Some(*hash.finalize().as_bytes()))
 }
 
 impl Inputs {
@@ -354,7 +362,7 @@ struct SessionData {
     inputs: Arc<Inputs>,
     status: SessionStatus,
     snapshot: Option<DatabaseSnapshot>,
-    pages: Arc<Vec<PageEntity>>,
+    pages: super::storage::PageStore,
     published: Option<Arc<InspectionGraph>>,
     revisions: std::collections::BTreeMap<u64, Arc<InspectionGraph>>,
     traversal_budget: super::TraversalBudget,
@@ -368,6 +376,52 @@ struct SessionData {
 }
 
 impl SessionData {
+    fn pointer_map_evidence(
+        &self,
+        geometry: &super::DatabaseGeometry,
+    ) -> Option<super::PointerMapEvidence> {
+        if let Some(published) = &self.published {
+            let mut evidence = published.pointer_map.clone();
+            evidence.pages = self.pages.pointer_maps.materialize().ok()?;
+            evidence.locations = evidence
+                .pages
+                .iter()
+                .map(|page| page.page.clone())
+                .collect();
+            Some(evidence)
+        } else if let Some(maps) = self
+            .observed_topology
+            .as_ref()
+            .and_then(|topology| topology.pointer_map.as_ref())
+        {
+            maps.materialize().ok()
+        } else {
+            Some(super::PointerMapEvidence::header(geometry))
+        }
+    }
+
+    fn freelist_evidence(&self) -> super::FreelistEvidence {
+        let published = self.published.as_deref();
+        let observed = self.observed_topology.as_ref();
+        let mut freelist = published.map_or_else(
+            || {
+                observed.map_or_else(super::FreelistEvidence::uninspected, |topology| {
+                    topology.freelist.clone()
+                })
+            },
+            |revision| revision.freelist.clone(),
+        );
+        freelist.trunks = published.map_or_else(
+            || {
+                observed.map_or_else(Vec::new, |topology| {
+                    topology.freelist_trunks.iter().collect()
+                })
+            },
+            |_| self.pages.freelist_trunks.iter().collect(),
+        );
+        freelist
+    }
+
     fn coverage(&self, reason: CoverageReason) -> Coverage {
         let p = &self.status.progress;
         Coverage {
@@ -410,40 +464,47 @@ impl SessionData {
         state: SessionState,
         reason: CoverageReason,
         mut topology: super::topology::Topology,
-        schema: super::SchemaEvidence,
+        schema: super::schema::StoredSchema,
         semantic_metadata: crate::semantic::SemanticMetadata,
     ) {
         let coverage = self.coverage(reason);
         if let Some(snapshot) = &self.snapshot {
-            let mut pages =
-                Arc::try_unwrap(std::mem::replace(&mut self.pages, Arc::new(Vec::new())))
-                    .unwrap_or_else(|pages| (*pages).clone());
-            for (number, page) in std::mem::take(&mut topology.freelist.page_overrides) {
-                pages[(number - 1) as usize] = page;
-            }
-            for (page, classification) in pages.iter_mut().zip(topology.classifications) {
-                page.classification = classification;
-            }
+            self.pages.publish(
+                topology.classifications,
+                std::mem::take(&mut topology.page_overrides),
+            );
+            self.pages.freelist_trunks = Arc::new(topology.freelist_trunks);
+            self.pages.diagnostics = Arc::new(topology.diagnostics);
+            self.pages.claims = Arc::new(topology.claims);
+            self.pages.relationships = Arc::new(topology.relationships);
+            self.pages.traversals = Arc::new(topology.traversals);
             self.published = Some(Arc::new(InspectionGraph {
                 work_coverage: self.topology_cancellation.receipts(),
                 operational_budget: self.status.operational_budget,
                 semantic_metadata,
                 deep_inspections: vec![],
-                schema,
+                schema: {
+                    let header = schema.header.clone();
+                    self.pages.schema = Some(Arc::new(schema));
+                    header
+                },
                 sidecars: self.sidecars.clone(),
                 revision: 1,
                 coverage: coverage.clone(),
                 snapshot: snapshot.clone(),
-                pages,
-                relationship_claims: topology.claims,
-                relationships: topology.relationships,
-                traversals: topology.traversals,
-                diagnostics: topology.diagnostics,
+                pages: Vec::new(),
+                relationship_claims: Vec::new(),
+                relationships: Vec::new(),
+                traversals: Vec::new(),
+                diagnostics: Vec::new(),
                 topology_coverage: topology.coverage,
                 freelist: topology.freelist,
-                pointer_map: topology
-                    .pointer_map
-                    .unwrap_or_else(|| super::PointerMapEvidence::header(&snapshot.geometry)),
+                pointer_map: if let Some(maps) = topology.pointer_map {
+                    self.pages.pointer_maps = Arc::new(maps.pages);
+                    maps.header
+                } else {
+                    super::PointerMapEvidence::header(&snapshot.geometry)
+                },
             }));
             self.revisions
                 .insert(1, Arc::clone(self.published.as_ref().unwrap()));
@@ -542,6 +603,8 @@ impl InspectionSession {
                 processed_cells: 0,
                 inputs,
                 status: SessionStatus {
+                    storage_budget: super::StorageBudget::default(),
+                    storage: super::StorageStatus::default(),
                     operational_budget: super::OperationalBudget::default(),
                     work_progress: None,
                     work_coverage: vec![],
@@ -572,7 +635,7 @@ impl InspectionSession {
                     diagnostic: None,
                 },
                 snapshot: None,
-                pages: Arc::new(Vec::new()),
+                pages: super::storage::PageStore::new(super::StorageBudget::default()),
                 published: None,
                 revisions: std::collections::BTreeMap::new(),
                 traversal_budget,
@@ -585,6 +648,23 @@ impl InspectionSession {
                 sidecars,
             }),
         })
+    }
+
+    /// Sets private structural-storage ceilings before scanning starts.
+    /// # Panics
+    /// Panics if geometry or any page has already been inspected.
+    #[must_use]
+    pub fn with_storage_budget(self, budget: super::StorageBudget) -> Self {
+        {
+            let mut data = self.lock();
+            assert!(
+                data.snapshot.is_none(),
+                "storage must be configured before scanning"
+            );
+            data.status.storage_budget = budget;
+            data.pages = super::storage::PageStore::new(budget);
+        }
+        self
     }
 
     /// Observes structural work at deterministic boundaries outside the session lock.
@@ -709,12 +789,12 @@ impl InspectionSession {
             (
                 Arc::clone(&d.inputs),
                 d.snapshot.clone(),
-                Arc::clone(&d.pages),
+                Arc::new(d.pages.clone()),
                 d.traversal_budget,
                 Arc::clone(&d.topology_cancellation),
             )
         };
-        let topology = snapshot.as_ref().map_or_else(
+        let mut topology = snapshot.as_ref().map_or_else(
             || super::topology::Topology::empty(budget),
             |snapshot| {
                 super::topology::inspect(
@@ -726,6 +806,7 @@ impl InspectionSession {
                 )
             },
         );
+        self.contain_storage_stop(&pages, &mut topology, true)?;
         let schema = self.inspect_schema(
             &inputs,
             snapshot.as_ref(),
@@ -742,6 +823,7 @@ impl InspectionSession {
             &mut checkpoint,
         );
         let semantic_metadata = self.inspect_semantic(&inputs, &schema, reason, &cancellation);
+        self.contain_storage_stop(&pages, &mut topology, false)?;
         drop(pages);
         let (publish_state, publish_reason, pending_stop) = {
             let mut d = self.lock();
@@ -787,18 +869,53 @@ impl InspectionSession {
         Ok(())
     }
 
+    fn contain_storage_stop(
+        &self,
+        pages: &super::storage::PageStore,
+        topology: &mut super::topology::Topology,
+        topology_incomplete: bool,
+    ) -> Result<(), InspectionError> {
+        match pages.check() {
+            Ok(()) => {}
+            Err(super::storage::StorageError::Budget) => {
+                if topology_incomplete {
+                    topology.classifications = super::index::Sequence::default();
+                    topology.page_overrides = super::index_map::IndexMap::default();
+                    topology.relationships.clear();
+                    topology.traversals.clear();
+                }
+                pages.context.clear_budget_stop();
+            }
+            Err(super::storage::StorageError::Unavailable) => {
+                let mut data = self.lock();
+                data.topology_active = false;
+                data.status.state = SessionState::Fatal;
+                data.status.coverage = Some(data.coverage(CoverageReason::StorageFailure));
+                data.status.diagnostic = Some(Diagnostic {
+                    code: "private_storage_unavailable",
+                    message: "Private structural evidence could not be read.".into(),
+                    affected_inputs: Vec::new(),
+                });
+                return Err(InspectionError::StorageUnavailable);
+            }
+        }
+        Ok(())
+    }
+
     fn inspect_semantic(
         &self,
         inputs: &Inputs,
-        schema: &super::SchemaEvidence,
+        schema: &super::schema::StoredSchema,
         reason: CoverageReason,
         cancellation: &super::topology::WorkControl,
     ) -> crate::semantic::SemanticMetadata {
         match self.semantic_metadata {
             Some(budget) if reason == CoverageReason::Complete => {
                 cancellation.begin_phase(super::TopologyPhase::SemanticHelper, None);
+                let projection =
+                    schema.metadata(budget.bounded().max_schema_records.saturating_add(1));
                 let mut metadata =
-                    crate::semantic::enrich(&inputs.file, schema, budget, |coverage| {
+                    crate::semantic::enrich(&inputs.file, &projection, budget, |coverage| {
                         if coverage.phase == crate::semantic::SemanticPhase::Copy {
                             cancellation.set_extent(
                                 coverage.evaluated_bytes.div_ceil(16384),
@@ -850,18 +967,18 @@ impl InspectionSession {
         &self,
         inputs: &Inputs,
         snapshot: Option<&DatabaseSnapshot>,
-        pages: &[PageEntity],
+        pages: &super::storage::PageStore,
         topology: &super::topology::Topology,
         cancellation: &super::topology::WorkControl,
         checkpoint: &mut impl FnMut(),
-    ) -> super::SchemaEvidence {
+    ) -> super::schema::StoredSchema {
         let schema_budget = {
             let mut data = self.lock();
             data.status.progress.building_schema = true;
             data.schema_budget
         };
         let schema = snapshot.map_or_else(
-            || super::SchemaEvidence::unavailable(schema_budget),
+            || super::schema::StoredSchema::unavailable(schema_budget, pages),
             |snapshot| {
                 super::schema::inspect(
                     &inputs.file,
@@ -924,6 +1041,7 @@ impl InspectionSession {
         let mut data = self.lock();
         data.validate();
         let mut status = data.status.clone();
+        status.storage = data.pages.status();
         status.available_revisions = data.revisions.keys().copied().collect();
         status.progress.verifying = self.active_checks.load(Ordering::Acquire) > 0;
         status.progress.building_topology = data.topology_active;
@@ -992,20 +1110,12 @@ impl InspectionSession {
             .page_size;
         if !super::budget::memory_available(
             d.status.operational_budget.max_resident_bytes,
-            u64::from(page_size) * 2048,
+            u64::from(page_size) * 2,
         ) {
             drop(d);
             return self.finish(
                 SessionState::Stopped,
                 CoverageReason::ResidentMemoryBudget,
-                || {},
-            );
-        }
-        if Arc::make_mut(&mut d.pages).try_reserve(1).is_err() {
-            drop(d);
-            return self.finish(
-                SessionState::Stopped,
-                CoverageReason::AllocationFailure,
                 || {},
             );
         }
@@ -1020,27 +1130,40 @@ impl InspectionSession {
             .operational_budget
             .max_processed_cells
             .saturating_sub(d.processed_cells);
-        let Ok(detail) = super::roles::reserved_detail(geometry, number).map_or_else(
+        let detail = super::roles::reserved_detail(geometry, number).map_or_else(
             || {
                 super::btree::read_page_with_cell_budget(
                     &d.inputs.file,
                     number,
                     geometry,
                     remaining,
+                    d.status.operational_budget.max_resident_bytes,
                 )
             },
             Ok,
-        ) else {
-            drop(d);
-            return self.finish(SessionState::Stopped, CoverageReason::CellBudget, || {});
+        );
+        let detail = match detail {
+            Ok(detail) => detail,
+            Err(reason) => {
+                drop(d);
+                return self.finish(SessionState::Stopped, reason, || {});
+            }
         };
         let classification = super::roles::initial(geometry, number, &detail);
-        d.processed_cells += detail.cells.len() as u64;
-        Arc::make_mut(&mut d.pages).push(PageEntity {
+        let cells = detail.cells.len() as u64;
+        if let Err(error) = d.pages.push(PageEntity {
             number,
             classification,
             detail,
-        });
+        }) {
+            let reason = match error {
+                super::storage::StorageError::Budget => CoverageReason::StorageBudget,
+                super::storage::StorageError::Unavailable => CoverageReason::StorageFailure,
+            };
+            drop(d);
+            return self.finish(SessionState::Stopped, reason, || {});
+        }
+        d.processed_cells += cells;
         d.status.progress.completed = number;
         if !d.validate() {
             return Err(InspectionError::Invalidated);
@@ -1164,10 +1287,144 @@ impl InspectionSession {
         if !d.validate() {
             return Err(InspectionError::Invalidated);
         }
-        d.revisions
+        let stored = d
+            .revisions
             .get(&revision)
-            .cloned()
-            .ok_or(InspectionError::RevisionUnavailable)
+            .ok_or(InspectionError::RevisionUnavailable)?;
+        let reservation = d
+            .pages
+            .export_reservation()
+            .map_err(|_| InspectionError::StorageUnavailable)?
+            .saturating_add(deep::revision_reservation(stored));
+        if reservation > 0
+            && !super::budget::memory_available(
+                d.status.operational_budget.max_resident_bytes,
+                reservation,
+            )
+        {
+            return Err(InspectionError::CollectionBudget);
+        }
+        let mut graph = (**stored).clone();
+        graph.pages = d
+            .pages
+            .materialize()
+            .map_err(|_| InspectionError::StorageUnavailable)?;
+        if let Some(schema) = &d.pages.schema {
+            graph.schema = schema
+                .materialize()
+                .map_err(|_| InspectionError::StorageUnavailable)?;
+        }
+        graph.pointer_map.pages = d
+            .pages
+            .pointer_maps
+            .materialize()
+            .map_err(|_| InspectionError::StorageUnavailable)?;
+        graph.pointer_map.locations = graph
+            .pointer_map
+            .pages
+            .iter()
+            .map(|page| page.page.clone())
+            .collect();
+        graph.freelist.trunks = d.pages.freelist_trunks.iter().collect();
+        graph.diagnostics = d.pages.diagnostics.iter().collect();
+        graph.relationship_claims = d.pages.claims.iter().collect();
+        graph.relationships = d.pages.relationships.iter().collect();
+        graph.traversals = d.pages.traversals.iter().collect();
+        d.pages
+            .check()
+            .map_err(|_| InspectionError::StorageUnavailable)?;
+        Ok(Arc::new(graph))
+    }
+
+    /// Reads fixed-size metadata without loading any page or relationship collection.
+    /// # Errors
+    /// Rejects unknown revisions and changed inputs.
+    pub fn revision_summary(
+        &self,
+        revision: u64,
+    ) -> Result<super::RevisionSummary, InspectionError> {
+        self.verify(|| {})?;
+        let mut data = self.lock();
+        if !data.validate() {
+            return Err(InspectionError::Invalidated);
+        }
+        let graph = data
+            .revisions
+            .get(&revision)
+            .ok_or(InspectionError::RevisionUnavailable)?;
+        Ok(metadata::summary(graph, &data.pages))
+    }
+
+    /// Reads at most 256 consecutive pages from one immutable revision.
+    /// # Errors
+    /// Rejects invalid ranges, unavailable revisions, changed inputs or storage failures.
+    pub fn page_batch(
+        &self,
+        revision: u64,
+        first_page: u32,
+        limit: u32,
+    ) -> Result<super::PageBatch, InspectionError> {
+        if first_page == 0 || limit == 0 || limit > 256 {
+            return Err(InspectionError::InvalidPageRange);
+        }
+        self.verify(|| {})?;
+        let mut data = self.lock();
+        if !data.validate() {
+            return Err(InspectionError::Invalidated);
+        }
+        if !data.revisions.contains_key(&revision) {
+            return Err(InspectionError::RevisionUnavailable);
+        }
+        let total =
+            u32::try_from(data.pages.len()).map_err(|_| InspectionError::StorageUnavailable)?;
+        let end = first_page
+            .saturating_add(limit)
+            .min(total.saturating_add(1));
+        let mut pages = Vec::new();
+        let mut retained = 0_u64;
+        let mut next = first_page;
+        for number in first_page..end {
+            let reservation = data
+                .pages
+                .estimated_size((number - 1) as usize)
+                .map_err(|_| InspectionError::StorageUnavailable)?;
+            // A single dense 64 KiB page can exceed the normal decoded window.
+            // Estimates include 4x serialized bytes; admit one larger page up to
+            // the 8 MiB wire envelope while still enforcing resident headroom.
+            let window_budget = if pages.is_empty() {
+                32 * 1024 * 1024
+            } else {
+                8 * 1024 * 1024
+            };
+            if retained.saturating_add(reservation) > window_budget
+                || !super::budget::memory_available(
+                    data.status.operational_budget.max_resident_bytes,
+                    reservation,
+                )
+            {
+                if pages.is_empty() {
+                    return Err(InspectionError::CollectionBudget);
+                }
+                break;
+            }
+            let page = data
+                .pages
+                .get((number - 1) as usize)
+                .ok_or(InspectionError::StorageUnavailable)?;
+            pages.push(page);
+            retained += reservation;
+            next = number + 1;
+        }
+        data.pages
+            .check()
+            .map_err(|_| InspectionError::StorageUnavailable)?;
+        Ok(super::PageBatch {
+            revision,
+            first_page,
+            total,
+            next_page: (next <= total && next > first_page).then_some(next),
+            pages,
+        })
     }
 
     /// Returns the initial published graph.
@@ -1188,58 +1445,63 @@ impl InspectionSession {
         let snapshot = d.snapshot.clone()?;
         let published = d.published.as_deref();
         let observed = d.observed_topology.as_ref();
+        let mut reservation = d.pages.export_reservation().ok()?;
+        if published.is_none()
+            && let Some(topology) = observed
+        {
+            reservation = reservation.saturating_add(topology.export_reservation().ok()?);
+        }
+        if reservation > 0
+            && !super::budget::memory_available(
+                d.status.operational_budget.max_resident_bytes,
+                reservation,
+            )
+        {
+            return None;
+        }
+        let inventory = d.pages.materialize().ok()?;
         Some(ObservedEvidence {
             sidecars: d.sidecars.clone(),
-            pointer_map: published.map_or_else(
-                || {
-                    observed
-                        .and_then(|t| t.pointer_map.clone())
-                        .unwrap_or_else(|| super::PointerMapEvidence::header(&snapshot.geometry))
-                },
-                |revision| revision.pointer_map.clone(),
-            ),
-            freelist: published.map_or_else(
-                || {
-                    observed.map_or_else(super::FreelistEvidence::uninspected, |topology| {
-                        topology.freelist.clone()
-                    })
-                },
-                |revision| revision.freelist.clone(),
-            ),
+            pointer_map: d.pointer_map_evidence(&snapshot.geometry)?,
+            freelist: d.freelist_evidence(),
             coverage: d.coverage(CoverageReason::InputChanged),
             snapshot,
-            pages: published.map_or_else(
-                || {
-                    let mut pages = (*d.pages).clone();
-                    if let Some(topology) = observed {
-                        for (number, page) in &topology.freelist.page_overrides {
-                            pages[(*number - 1) as usize] = page.clone();
-                        }
-                        for (page, classification) in
-                            pages.iter_mut().zip(&topology.classifications)
-                        {
-                            page.classification = classification.clone();
+            pages: {
+                let mut pages = inventory;
+                if published.is_none()
+                    && let Some(topology) = observed
+                {
+                    for number in topology.page_overrides.keys() {
+                        if let Some(page) = topology.page_overrides.get(&number) {
+                            pages[(number - 1) as usize] = page;
                         }
                     }
-                    pages
-                },
-                |revision| revision.pages.clone(),
-            ),
+                    for (page, classification) in
+                        pages.iter_mut().zip(topology.classifications.iter())
+                    {
+                        page.classification = classification.clone();
+                    }
+                }
+                pages
+            },
             relationship_claims: published.map_or_else(
-                || observed.map_or_else(Vec::new, |topology| topology.claims.clone()),
-                |revision| revision.relationship_claims.clone(),
+                || observed.map_or_else(Vec::new, |topology| topology.claims.iter().collect()),
+                |_| d.pages.claims.iter().collect(),
             ),
             relationships: published.map_or_else(
-                || observed.map_or_else(Vec::new, |topology| topology.relationships.clone()),
-                |revision| revision.relationships.clone(),
+                || {
+                    observed
+                        .map_or_else(Vec::new, |topology| topology.relationships.iter().collect())
+                },
+                |_| d.pages.relationships.iter().collect(),
             ),
             traversals: published.map_or_else(
-                || observed.map_or_else(Vec::new, |topology| topology.traversals.clone()),
-                |revision| revision.traversals.clone(),
+                || observed.map_or_else(Vec::new, |topology| topology.traversals.iter().collect()),
+                |_| d.pages.traversals.iter().collect(),
             ),
             diagnostics: published.map_or_else(
-                || observed.map_or_else(Vec::new, |topology| topology.diagnostics.clone()),
-                |revision| revision.diagnostics.clone(),
+                || observed.map_or_else(Vec::new, |topology| topology.diagnostics.iter().collect()),
+                |_| d.pages.diagnostics.iter().collect(),
             ),
             topology_coverage: published.map_or_else(
                 || {

@@ -6,7 +6,7 @@ use super::{
     RelationshipState,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PageRole {
     Btree,
@@ -35,18 +35,18 @@ impl From<BtreeKind> for PageRole {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleClaim {
     pub role: PageRole,
-    pub source: &'static str,
+    pub source: std::borrow::Cow<'static, str>,
     pub evidence: PhysicalEvidence,
     pub state: RelationshipState,
     pub relationship_id: Option<String>,
     pub relationship_stop: Option<super::TraversalStopReason>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageClassification {
     pub role: PageRole,
@@ -62,13 +62,13 @@ pub(super) fn local(number: u32, detail: &PageDetail) -> PageClassification {
         .zip(detail.header.as_ref())
         .map(|(kind, header)| RoleClaim {
             role: kind.into(),
-            source: "local_structure",
+            source: std::borrow::Cow::Borrowed("local_structure"),
             evidence: PhysicalEvidence {
                 page: PageIdentity {
                     page_number: number,
                 },
                 range: header.range.clone(),
-                validation_rule: "sqlite_btree_header",
+                validation_rule: std::borrow::Cow::Borrowed("sqlite_btree_header"),
             },
             state: RelationshipState::Validated,
             relationship_id: None,
@@ -98,7 +98,7 @@ pub(super) fn evidence(
             file_offset: u64::from(page - 1) * u64::from(geometry.page_size) + u64::from(offset),
             length,
         },
-        validation_rule: rule,
+        validation_rule: std::borrow::Cow::Borrowed(rule),
     }
 }
 
@@ -152,9 +152,9 @@ pub(super) fn reserved_detail(geometry: &DatabaseGeometry, number: u32) -> Optio
         },
         regions: vec![super::btree::Region {
             kind: if role == PageRole::LockByte {
-                "lock_byte"
+                std::borrow::Cow::Borrowed("lock_byte")
             } else {
-                "pointer_map"
+                std::borrow::Cow::Borrowed("pointer_map")
             },
             range: evidence(
                 geometry,
@@ -186,7 +186,7 @@ pub(super) fn initial(
             reconciled: false,
             claims: vec![RoleClaim {
                 role,
-                source: "database_geometry",
+                source: std::borrow::Cow::Borrowed("database_geometry"),
                 evidence: evidence(
                     geometry,
                     1,
@@ -222,22 +222,28 @@ fn merge(left: PageRole, right: PageRole) -> PageRole {
 
 pub(super) fn reconcile(
     geometry: &DatabaseGeometry,
-    pages: &[super::PageEntity],
+    pages: &super::storage::PageStore,
     topology: &mut super::topology::Topology,
     control: &super::topology::WorkControl,
 ) -> bool {
     control.begin_phase(super::TopologyPhase::RoleReconciliation, None);
-    let mut classifications = Vec::new();
+    let mut classifications = super::index::Sequence::new(std::sync::Arc::clone(&pages.context));
     let complete = collect_claims(geometry, pages, topology, &mut classifications, control)
         && resolve_claims(&mut classifications, topology, control)
         && contain_conflicts(&mut classifications, topology, control)
-        && classifications.iter_mut().all(|classification| {
+        && (0..classifications.len()).all(|index| {
+            let Some(mut classification) = control.edit_record(&mut classifications, index) else {
+                return false;
+            };
             if !checkpoint(control) {
                 return false;
             }
             classification.reconciled = true;
             true
         });
+    if matches!(pages.check(), Err(super::storage::StorageError::Budget)) {
+        control.stop_for_storage_budget();
+    }
     topology.classifications = classifications;
     if complete {
         control.finish_phase(super::TopologyPhase::RoleReconciliation);
@@ -255,17 +261,17 @@ fn checkpoint(control: &super::topology::WorkControl) -> bool {
 
 fn collect_claims(
     geometry: &DatabaseGeometry,
-    pages: &[super::PageEntity],
+    pages: &super::storage::PageStore,
     topology: &mut super::topology::Topology,
-    classifications: &mut Vec<PageClassification>,
+    classifications: &mut super::index::Sequence<PageClassification>,
     control: &super::topology::WorkControl,
 ) -> bool {
-    for page in pages {
+    for page in pages.iter() {
         if !checkpoint(control) {
             return false;
         }
         let mut result = page.classification.clone();
-        if topology.freelist.page_overrides.contains_key(&page.number) {
+        if topology.page_overrides.contains_key(&page.number) {
             // Preserve stale headers as observations, never as live storage roles.
             result.role = PageRole::Unknown;
             for claim in &mut result.claims {
@@ -273,16 +279,19 @@ fn collect_claims(
             }
         }
         classifications.push(result);
+        if pages.check().is_err() {
+            return false;
+        }
     }
     for claim in &topology.claims {
         if !checkpoint(control) {
             return false;
         }
-        let Some(target) = claim
+        let Some(mut target) = claim
             .target
             .as_ref()
             .and_then(|p| p.page_number.checked_sub(1))
-            .and_then(|n| classifications.get_mut(n as usize))
+            .and_then(|n| control.edit_record(classifications, n as usize))
         else {
             continue;
         };
@@ -295,7 +304,7 @@ fn collect_claims(
         };
         target.claims.push(RoleClaim {
             role,
-            source: "relationship",
+            source: std::borrow::Cow::Borrowed("relationship"),
             evidence: claim.evidence.clone(),
             state: claim.state,
             relationship_id: Some(claim.id.clone()),
@@ -306,14 +315,18 @@ fn collect_claims(
 }
 
 fn resolve_claims(
-    classifications: &mut [PageClassification],
+    classifications: &mut super::index::Sequence<PageClassification>,
     topology: &mut super::topology::Topology,
     control: &super::topology::WorkControl,
 ) -> bool {
-    for classification in classifications {
+    for index in 0..classifications.len() {
+        let Some(mut classification) = control.edit_record(classifications, index) else {
+            return false;
+        };
         if !checkpoint(control) {
             return false;
         }
+        let classification = &mut *classification;
         classification.role = PageRole::Unknown;
         for claim in &classification.claims {
             if !checkpoint(control) {
@@ -349,7 +362,7 @@ fn resolve_claims(
                 }
             }
             topology.diagnostics.push(super::StructuralDiagnostic {
-                code: "page_role_conflict",
+                code: std::borrow::Cow::Borrowed("page_role_conflict"),
                 severity: super::DiagnosticSeverity::Error,
                 evidence,
                 affected_relationships,
@@ -362,14 +375,14 @@ fn resolve_claims(
 
 fn collect_pointer_map_claims(
     geometry: &DatabaseGeometry,
-    classifications: &mut [PageClassification],
+    classifications: &mut super::index::Sequence<PageClassification>,
     topology: &mut super::topology::Topology,
     control: &super::topology::WorkControl,
 ) -> bool {
     if let Some(maps) = &topology.pointer_map {
         for code in &maps.diagnostics {
             topology.diagnostics.push(super::StructuralDiagnostic {
-                code,
+                code: std::borrow::Cow::Borrowed(code),
                 severity: super::DiagnosticSeverity::Error,
                 evidence: vec![
                     maps.largest_root.evidence.clone(),
@@ -385,7 +398,7 @@ fn collect_pointer_map_claims(
             }
             for code in &map.diagnostics {
                 topology.diagnostics.push(super::StructuralDiagnostic {
-                    code,
+                    code: code.clone(),
                     severity: super::DiagnosticSeverity::Error,
                     evidence: vec![evidence(
                         geometry,
@@ -416,7 +429,7 @@ fn collect_pointer_map_claims(
                 };
                 for code in &entry.diagnostics {
                     topology.diagnostics.push(super::StructuralDiagnostic {
-                        code,
+                        code: code.clone(),
                         severity: super::DiagnosticSeverity::Error,
                         evidence: if *code == "pointer_map_root_above_largest_root" {
                             vec![entry.evidence.clone(), maps.largest_root.evidence.clone()]
@@ -427,14 +440,16 @@ fn collect_pointer_map_claims(
                         containment: super::Containment::RelationshipExcluded,
                     });
                 }
-                let Some(target) = classifications.get_mut((page_number - 1) as usize) else {
+                let Some(mut target) =
+                    control.edit_record(classifications, (page_number - 1) as usize)
+                else {
                     continue;
                 };
                 target.referenced = true;
                 if let Some(kind) = entry.kind {
                     target.claims.push(RoleClaim {
                         role: kind.role(),
-                        source: "pointer_map",
+                        source: std::borrow::Cow::Borrowed("pointer_map"),
                         evidence: entry.evidence.clone(),
                         state: entry.state,
                         relationship_id: None,
@@ -448,7 +463,7 @@ fn collect_pointer_map_claims(
 }
 
 fn contain_conflicts(
-    classifications: &mut [PageClassification],
+    classifications: &mut super::index::Sequence<PageClassification>,
     topology: &mut super::topology::Topology,
     control: &super::topology::WorkControl,
 ) -> bool {
@@ -458,8 +473,11 @@ fn contain_conflicts(
     if !dependencies.propagate(classifications, topology, control) {
         return false;
     }
-    let mut physical = Vec::new();
-    for (classification, support) in classifications.iter_mut().zip(dependencies.support) {
+    let mut physical = classifications.sibling();
+    for (index, support) in dependencies.support.into_iter().enumerate() {
+        let Some(mut classification) = control.edit_record(classifications, index) else {
+            return false;
+        };
         if !checkpoint(control) {
             return false;
         }
@@ -471,7 +489,10 @@ fn contain_conflicts(
             role
         };
     }
-    for claim in &mut topology.claims {
+    for index in 0..topology.claims.len() {
+        let Some(mut claim) = topology.claims.get_mut(index) else {
+            return false;
+        };
         if !checkpoint(control) {
             return false;
         }
@@ -480,7 +501,7 @@ fn contain_conflicts(
                 .target
                 .as_ref()
                 .and_then(|p| p.page_number.checked_sub(1))
-                .and_then(|n| classifications.get(n as usize))
+                .and_then(|n| control.read_record(classifications, n as usize))
                 .is_some_and(|c| c.role == PageRole::Conflicting)
         {
             claim.state = RelationshipState::Conflicting;
@@ -504,11 +525,12 @@ const CLAIM_ROLES: [PageRole; 11] = [
     PageRole::LockByte,
 ];
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, serde::Deserialize)]
 struct RoleSupport {
     counts: [usize; PageRole::Conflicting as usize + 1],
     conflicts: usize,
 }
+impl super::index::StoredRecord for RoleSupport {}
 
 impl RoleSupport {
     fn physical(&self) -> PageRole {
@@ -544,7 +566,7 @@ fn credible(state: RelationshipState) -> bool {
     )
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, serde::Deserialize)]
 enum Requirement {
     Header,
     Btree,
@@ -570,13 +592,13 @@ impl Requirement {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, serde::Deserialize)]
 enum DependentEvidence {
     Relationship(usize),
     PointerMap(usize, usize),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, serde::Deserialize)]
 struct Dependency {
     slot: (usize, usize),
     evidence: DependentEvidence,
@@ -584,22 +606,22 @@ struct Dependency {
 }
 
 struct Dependencies {
-    support: Vec<RoleSupport>,
-    outgoing: std::collections::BTreeMap<u32, Vec<Dependency>>,
+    support: super::index::Sequence<RoleSupport>,
+    outgoing: super::index_map::IndexMap<u32, Vec<Dependency>>,
 }
 
 impl Dependencies {
     fn collect(
-        classifications: &[PageClassification],
+        classifications: &super::index::Sequence<PageClassification>,
         topology: &super::topology::Topology,
         control: &super::topology::WorkControl,
     ) -> Option<Self> {
         use super::{
             EntityIdentity as Entity, PointerMapKind as Map, RelationshipKind as Relation,
         };
-        let mut support = Vec::new();
-        let mut relationship_slots = std::collections::HashMap::new();
-        let mut map_slots = std::collections::HashMap::new();
+        let mut support = classifications.sibling();
+        let mut relationship_slots = classifications.map();
+        let mut map_slots = classifications.map();
         for (page, classification) in classifications.iter().enumerate() {
             if !checkpoint(control) {
                 return None;
@@ -611,7 +633,7 @@ impl Dependencies {
                 }
                 counts.add(claim);
                 if let Some(id) = &claim.relationship_id {
-                    relationship_slots.insert(id.as_str(), (page, index));
+                    relationship_slots.insert(id.clone(), (page, index));
                 }
                 if claim.source == "pointer_map" {
                     map_slots.insert(
@@ -626,12 +648,12 @@ impl Dependencies {
             support.push(counts);
         }
         // Physical source order also stabilizes diagnostics and cancellation prefixes.
-        let mut outgoing = std::collections::BTreeMap::<u32, Vec<Dependency>>::new();
+        let mut outgoing: super::index_map::IndexMap<u32, Vec<Dependency>> = classifications.map();
         for (index, claim) in topology.claims.iter().enumerate() {
             if !checkpoint(control) {
                 return None;
             }
-            let Some(&slot) = relationship_slots.get(claim.id.as_str()) else {
+            let Some(slot) = relationship_slots.get(&claim.id) else {
                 continue;
             };
             let source = match claim.source {
@@ -646,11 +668,16 @@ impl Dependencies {
                 Relation::FreelistTrunk if source == 1 => Requirement::Header,
                 Relation::FreelistTrunk | Relation::FreelistLeaf => Requirement::FreelistTrunk,
             };
-            outgoing.entry(source).or_default().push(Dependency {
+            let mut dependencies = control.read_index(&outgoing, &source).unwrap_or_default();
+            if !checkpoint(control) {
+                return None;
+            }
+            dependencies.push(Dependency {
                 slot,
                 requirement,
                 evidence: DependentEvidence::Relationship(index),
             });
+            outgoing.insert(source, dependencies);
         }
         if let Some(maps) = &topology.pointer_map {
             for (map_index, map) in maps.pages.iter().enumerate() {
@@ -661,7 +688,7 @@ impl Dependencies {
                     if !checkpoint(control) {
                         return None;
                     }
-                    let Some(&slot) =
+                    let Some(slot) =
                         map_slots.get(&(map.page.page_number, entry.evidence.range.page_offset))
                     else {
                         continue;
@@ -672,11 +699,17 @@ impl Dependencies {
                         _ => continue,
                     };
                     if let Some(parent) = entry.parent_value {
-                        outgoing.entry(parent).or_default().push(Dependency {
+                        let mut dependencies =
+                            control.read_index(&outgoing, &parent).unwrap_or_default();
+                        if !checkpoint(control) {
+                            return None;
+                        }
+                        dependencies.push(Dependency {
                             slot,
                             requirement,
                             evidence: DependentEvidence::PointerMap(map_index, index),
                         });
+                        outgoing.insert(parent, dependencies);
                     }
                 }
             }
@@ -688,20 +721,22 @@ impl Dependencies {
     // changes, not once per lost incoming claim. Each dependency is revoked once.
     fn propagate(
         &mut self,
-        classifications: &mut [PageClassification],
+        classifications: &mut super::index::Sequence<PageClassification>,
         topology: &mut super::topology::Topology,
         control: &super::topology::WorkControl,
     ) -> bool {
-        let mut queue = std::collections::VecDeque::new();
-        let mut queued = std::collections::HashSet::new();
-        for &source in self.outgoing.keys() {
+        let mut queue = classifications.sibling();
+        let mut front = 0;
+        let mut queued = classifications.map();
+        for source in self.outgoing.keys() {
             if !checkpoint(control) {
                 return false;
             }
-            queue.push_back(source);
-            queued.insert(source);
+            queue.push(source);
+            queued.insert(source, ());
         }
-        while let Some(source) = queue.pop_front() {
+        while let Some(source) = queue.get(front) {
+            front += 1;
             if !checkpoint(control) {
                 return false;
             }
@@ -709,27 +744,36 @@ impl Dependencies {
             let role = source
                 .checked_sub(1)
                 .and_then(|n| self.support.get(n as usize))
-                .map_or(PageRole::Unknown, RoleSupport::physical);
-            for dependency in &self.outgoing[&source] {
+                .map_or(PageRole::Unknown, |support| support.physical());
+            for dependency in control
+                .read_index(&self.outgoing, &source)
+                .unwrap_or_default()
+            {
                 if !checkpoint(control) {
                     return false;
                 }
                 let (page, index) = dependency.slot;
-                let claim = &mut classifications[page].claims[index];
+                let Some(mut classification) = control.edit_record(classifications, page) else {
+                    return false;
+                };
+                let claim = &mut classification.claims[index];
                 if dependency.requirement.accepts(role) || !credible(claim.state) {
                     continue;
                 }
-                let previous = self.support[page].physical();
-                self.support[page].remove(claim);
+                let Some(mut support) = self.support.get_mut(page) else {
+                    return false;
+                };
+                let previous = support.physical();
+                support.remove(claim);
                 claim.state = RelationshipState::Unresolved;
                 claim.relationship_stop = Some(super::TraversalStopReason::ConflictingClaim);
-                invalidate_dependency(*dependency, topology);
+                invalidate_dependency(dependency, topology);
                 let target = u32::try_from(page + 1).expect("page inventory index");
-                if previous != self.support[page].physical()
+                if previous != support.physical()
                     && self.outgoing.contains_key(&target)
-                    && queued.insert(target)
+                    && queued.insert(target, ()).is_none()
                 {
-                    queue.push_back(target);
+                    queue.push(target);
                 }
             }
         }
@@ -740,17 +784,29 @@ impl Dependencies {
 fn invalidate_dependency(dependency: Dependency, topology: &mut super::topology::Topology) {
     match dependency.evidence {
         DependentEvidence::Relationship(index) => {
-            let claim = &mut topology.claims[index];
+            let Some(mut claim) = topology.claims.get_mut(index) else {
+                return;
+            };
             claim.state = RelationshipState::Unresolved;
             claim.stop_reason = Some(super::TraversalStopReason::ConflictingClaim);
         }
         DependentEvidence::PointerMap(map, index) => {
-            let entry = &mut topology.pointer_map.as_mut().expect("map dependency").pages[map]
-                .entries[index];
+            let Some(mut stored) = topology
+                .pointer_map
+                .as_mut()
+                .expect("map dependency")
+                .pages
+                .get_mut(map)
+            else {
+                return;
+            };
+            let entry = &mut stored.entries[index];
             entry.state = RelationshipState::Unresolved;
-            entry.diagnostics.push("pointer_map_parent_role_conflict");
+            entry
+                .diagnostics
+                .push("pointer_map_parent_role_conflict".into());
             topology.diagnostics.push(super::StructuralDiagnostic {
-                code: "pointer_map_parent_role_conflict",
+                code: std::borrow::Cow::Borrowed("pointer_map_parent_role_conflict"),
                 severity: super::DiagnosticSeverity::Error,
                 evidence: vec![entry.evidence.clone()],
                 affected_relationships: vec![],
@@ -761,30 +817,32 @@ fn invalidate_dependency(dependency: Dependency, topology: &mut super::topology:
 }
 
 fn normalize_after_conflicts(
-    classifications: &[PageClassification],
-    physical: &[bool],
+    classifications: &super::index::Sequence<PageClassification>,
+    physical: &super::index::Sequence<bool>,
     topology: &mut super::topology::Topology,
     control: &super::topology::WorkControl,
 ) -> bool {
-    let mut valid = std::collections::HashSet::new();
+    let mut valid = classifications.map();
     for claim in &topology.claims {
         if !checkpoint(control) {
             return false;
         }
         if claim.state == RelationshipState::Validated {
-            valid.insert(claim.id.as_str());
+            valid.insert(claim.id.clone(), ());
         }
     }
-    let relationships = std::mem::take(&mut topology.relationships);
+    let empty = topology.relationships.sibling();
+    let relationships = std::mem::replace(&mut topology.relationships, empty);
     for relationship in relationships {
         if !checkpoint(control) {
             return false;
         }
-        if valid.contains(relationship.claim_id.as_str()) {
+        if valid.contains_key(&relationship.claim_id) {
             topology.relationships.push(relationship);
         }
     }
-    let traversals = std::mem::take(&mut topology.traversals);
+    let empty = topology.traversals.sibling();
+    let traversals = std::mem::replace(&mut topology.traversals, empty);
     for mut traversal in traversals {
         if !checkpoint(control) {
             return false;
@@ -795,7 +853,7 @@ fn normalize_after_conflicts(
         } = traversal.origin
         {
             let id = format!("overflow:cell:{page_number}:{cell_index}");
-            if !traversal.validated_prefix.is_empty() && !valid.contains(id.as_str()) {
+            if !traversal.validated_prefix.is_empty() && !valid.contains_key(&id) {
                 let target = traversal.validated_prefix.first().cloned();
                 traversal.validated_prefix.clear();
                 traversal.stop = Some(super::TraversalStop {
@@ -812,15 +870,23 @@ fn normalize_after_conflicts(
             }
             let index = (page.page_number - 1) as usize;
             let independent_origin = position == 0
-                && !physical[index]
+                && !physical.get(index).unwrap_or(true)
                 && matches!(traversal.origin, super::EntityIdentity::Page { page_number } if page_number == page.page_number);
-            if classifications[index].role == PageRole::Conflicting && !independent_origin {
+            let Some(classification) = control.read_record(classifications, index) else {
+                return false;
+            };
+            if classification.role == PageRole::Conflicting && !independent_origin {
                 boundary = Some((position, page.clone()));
                 break;
             }
         }
         if let Some((position, target)) = boundary {
-            let claim_id = classifications[(target.page_number - 1) as usize]
+            let Some(classification) =
+                control.read_record(classifications, (target.page_number - 1) as usize)
+            else {
+                return false;
+            };
+            let claim_id = classification
                 .claims
                 .iter()
                 .find_map(|c| c.relationship_id.clone())

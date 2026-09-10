@@ -71,12 +71,15 @@ impl TerminalFlow {
         if status.state == DeepState::Completed
             && selected
             && let Ok(result) = self.session.deep_result(&deep.job.id, &deep.target)
-            && let Ok(graph) = self.session.revision(result.revision)
         {
             self.revision = result.revision;
-            self.graph = Some(graph);
-            self.values = Some(result);
-            self.message = "Selected-cell values; leaving this cell or revision hides them".into();
+            self.graph = None;
+            self.load_window();
+            if self.graph.is_some() {
+                self.values = Some(result);
+                self.message =
+                    "Selected-cell values; leaving this cell or revision hides them".into();
+            }
         }
         self.deep.as_mut().unwrap().handled = true;
     }

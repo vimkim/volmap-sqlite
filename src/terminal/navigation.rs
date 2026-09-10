@@ -1,11 +1,11 @@
-use super::{Entry, Focus, TerminalFlow, entity_page};
+use super::{Entry, Focus, TerminalFlow, entity_page, window};
 use crate::inspection::EntityIdentity;
 impl TerminalFlow {
     pub(super) fn entries(&self) -> Vec<Entry> {
         let Some(graph) = &self.graph else {
             return Vec::new();
         };
-        match self.focus() {
+        let mut entries = match self.focus() {
             Focus::Database => [
                 ("Schema objects", Focus::Schema),
                 ("B-tree storage", Focus::Btrees),
@@ -23,15 +23,16 @@ impl TerminalFlow {
                 .schema
                 .objects
                 .iter()
-                .map(|object| Entry {
+                .enumerate()
+                .map(|(index, object)| Entry {
                     label: object
                         .name
                         .clone()
                         .unwrap_or_else(|| "Unavailable schema record".into()),
-                    focus: Focus::Object(object.identity.clone()),
+                    focus: Focus::Object(object.identity.clone(), self.location().offset + index),
                 })
                 .collect(),
-            Focus::Object(identity) => graph
+            Focus::Object(identity, _) => graph
                 .schema
                 .objects
                 .iter()
@@ -59,10 +60,10 @@ impl TerminalFlow {
                 .map(|page| page_entry(page.number))
                 .collect(),
             Focus::Freelist => graph
-                .pages
+                .freelist
+                .trunks
                 .iter()
-                .filter(|page| page.detail.allocation_role.is_some())
-                .map(|page| page_entry(page.number))
+                .map(|trunk| page_entry(trunk.page.page_number))
                 .collect(),
             Focus::PointerMaps => graph
                 .pointer_map
@@ -70,7 +71,8 @@ impl TerminalFlow {
                 .iter()
                 .map(|page| page_entry(page.page_number))
                 .collect(),
-            Focus::Page(number) => page_entries(graph, *number),
+            Focus::Page(number) => page_entries(graph, *number, self.location().offset),
+            Focus::Traversal(_) => prefix_entries(graph),
             Focus::Cell(identity) => graph
                 .relationships
                 .iter()
@@ -89,12 +91,89 @@ impl TerminalFlow {
                 .flat_map(|finding| finding.evidence.iter())
                 .map(|evidence| page_entry(evidence.page.page_number))
                 .collect(),
-            Focus::Help => Vec::new(),
+            Focus::Help | Focus::WindowOffset(_) => Vec::new(),
+        };
+        self.add_page_schema_entries(&mut entries);
+        self.add_traversal_entries(&mut entries);
+        self.add_window_entries(&mut entries);
+        entries
+    }
+
+    fn add_traversal_entries(&self, entries: &mut Vec<Entry>) {
+        for header in &self.traversal_headers {
+            let visible = match self.focus() {
+                Focus::Page(_) => true,
+                Focus::Cell(cell) => {
+                    header.origin
+                        == EntityIdentity::Cell {
+                            page_number: cell.page_number,
+                            cell_index: cell.index,
+                        }
+                }
+                _ => false,
+            };
+            if visible {
+                entries.push(Entry {
+                    label: format!(
+                        "Traversal {:?} ({} pages)",
+                        header.kind, header.prefix_count
+                    ),
+                    focus: Focus::Traversal(header.traversal_offset),
+                });
+            }
+        }
+    }
+
+    fn add_page_schema_entries(&self, entries: &mut Vec<Entry>) {
+        if !matches!(self.focus(), Focus::Page(_)) {
+            return;
+        }
+        if let Some(graph) = &self.graph {
+            entries.extend(graph.schema.objects.iter().zip(&self.schema_positions).map(
+                |(object, position)| Entry {
+                    label: format!("Schema {}", object.name.as_deref().unwrap_or("record")),
+                    focus: Focus::Object(object.identity.clone(), *position),
+                },
+            ));
+        }
+    }
+
+    fn add_window_entries(&self, entries: &mut Vec<Entry>) {
+        if self.location().offset > 0 {
+            entries.push(Entry {
+                label: "Previous collection window".into(),
+                focus: Focus::WindowOffset(
+                    self.location().offset.saturating_sub(window::SIZE as usize),
+                ),
+            });
+        }
+        if let Some(next) = self.next_window() {
+            entries.push(Entry {
+                label: "Next collection window".into(),
+                focus: Focus::WindowOffset(next),
+            });
         }
     }
 }
 
-fn page_entries(graph: &crate::inspection::InspectionGraph, number: u32) -> Vec<Entry> {
+fn prefix_entries(graph: &crate::inspection::InspectionGraph) -> Vec<Entry> {
+    graph
+        .traversals
+        .iter()
+        .flat_map(|traversal| {
+            traversal
+                .validated_prefix
+                .iter()
+                .map(|page| page_entry(page.page_number))
+        })
+        .collect()
+}
+
+fn page_entries(
+    graph: &crate::inspection::InspectionGraph,
+    number: u32,
+    offset: usize,
+) -> Vec<Entry> {
     graph
         .pages
         .iter()
@@ -104,6 +183,8 @@ fn page_entries(graph: &crate::inspection::InspectionGraph, number: u32) -> Vec<
                 .detail
                 .cells
                 .iter()
+                .skip(offset)
+                .take(window::SIZE as usize)
                 .map(|cell| Entry {
                     label: format!("Cell {}", cell.identity.index),
                     focus: Focus::Cell(cell.identity.clone()),
@@ -115,14 +196,17 @@ fn page_entries(graph: &crate::inspection::InspectionGraph, number: u32) -> Vec<
                 .iter()
                 .find(|map| map.page.page_number == number)
             {
-                entries.extend(map.entries.iter().filter_map(|entry| {
-                    let target = entity_page(&entry.target);
-                    graph
-                        .pages
+                entries.extend(
+                    map.entries
                         .iter()
-                        .any(|page| page.number == target)
-                        .then(|| page_entry(target))
-                }));
+                        .skip(offset)
+                        .take(window::SIZE as usize)
+                        .filter_map(|entry| {
+                            let target = entity_page(&entry.target);
+                            (target >= 1 && target <= graph.coverage.evaluated)
+                                .then(|| page_entry(target))
+                        }),
+                );
             }
             for relation in &graph.relationships {
                 if entity_page(&relation.source) == number {

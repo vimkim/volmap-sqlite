@@ -6,6 +6,15 @@ use std::path::Path;
 use serde::Serialize;
 use thiserror::Error;
 
+mod metadata;
+pub use metadata::{
+    AttributedSchemaObject, FreelistHeader, PointerMapHeader, RevisionMetadata, SchemaHeader,
+    SchemaObjectHeader, TraversalHeader,
+};
+mod index;
+mod index_map;
+mod storage;
+pub use storage::{StorageBudget, StorageStatus};
 mod budget;
 pub use budget::OperationalBudget;
 mod btree;
@@ -59,6 +68,8 @@ pub enum InspectionError {
     Invalidated,
     #[error("no published revision matches this request")]
     RevisionUnavailable,
+    #[error("no retained entity matches this request")]
+    EntityUnavailable,
     #[error("the inspection is no longer scanning")]
     NotScanning,
     #[error("the database file could not be opened read-only: {0}")]
@@ -85,6 +96,14 @@ pub enum InspectionError {
     TooManyPages,
     #[error("the page inventory cannot fit in memory")]
     PageInventoryTooLarge,
+    #[error("private inspection storage is unavailable")]
+    StorageUnavailable,
+    #[error("the complete projection exceeds the memory budget; request a bounded collection")]
+    CollectionBudget,
+    #[error("page ranges require a positive start and a limit from 1 through 256")]
+    InvalidPageRange,
+    #[error("collection limits must be from 1 through 256")]
+    InvalidCollectionRange,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -125,12 +144,52 @@ pub struct DatabaseSnapshot {
     pub geometry: DatabaseGeometry,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageEntity {
     pub number: u32,
     pub classification: PageClassification,
     pub detail: PageDetail,
+}
+
+/// Fixed-size revision metadata, independent of the number of inspected entities.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionSummary {
+    pub snapshot: DatabaseSnapshot,
+    pub revision: u64,
+    pub coverage: Coverage,
+    pub topology_coverage: TopologyCoverage,
+    pub page_count: u32,
+    pub relationship_count: usize,
+    pub claim_count: usize,
+    pub traversal_count: usize,
+    pub diagnostic_count: usize,
+    pub schema_state: SchemaState,
+    pub schema_object_count: usize,
+    pub freelist_trunk_count: usize,
+    pub pointer_map_page_count: usize,
+}
+
+/// A bounded window over one complete retained collection; offsets are zero-based.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionBatch<T> {
+    pub revision: u64,
+    pub offset: usize,
+    pub total: usize,
+    pub next_offset: Option<usize>,
+    pub items: Vec<T>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageBatch {
+    pub revision: u64,
+    pub first_page: u32,
+    pub total: u32,
+    pub next_page: Option<u32>,
+    pub pages: Vec<PageEntity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

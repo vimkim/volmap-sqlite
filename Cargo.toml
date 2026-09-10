@@ -25,9 +25,10 @@ thiserror = "2.0.16"
 tokio = { version = "1.47.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 
-rusqlite = { version = "0.37.0", features = ["bundled", "hooks", "limits", "modern_sqlite", "trace"] }
+rusqlite = { version = "0.37.0", features = ["blob", "bundled", "hooks", "limits", "modern_sqlite", "trace"] }
 tempfile = "3.21.0"
 rustix = { version = "1.1.4", features = ["process"] }
+blake3 = "=1.8.7"
 
 [dev-dependencies]
 tower = { version = "0.5.2", features = ["util"] }

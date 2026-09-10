@@ -6,7 +6,7 @@ use serde::Serialize;
 use super::DatabaseGeometry;
 
 /// Half-open byte extent, expressed in page-relative and main-file coordinates.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ByteRange {
     pub page_offset: u32,
@@ -14,14 +14,14 @@ pub struct ByteRange {
     pub length: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Region {
-    pub kind: &'static str,
+    pub kind: std::borrow::Cow<'static, str>,
     pub range: ByteRange,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BtreeHeader {
     pub range: ByteRange,
@@ -32,7 +32,7 @@ pub struct BtreeHeader {
     pub rightmost_child: Option<u32>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CellIdentity {
     pub page_number: u32,
@@ -40,7 +40,7 @@ pub struct CellIdentity {
     pub index: u16,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordDetail {
     pub state: RecordState,
@@ -49,7 +49,7 @@ pub struct RecordDetail {
     pub serial_types: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordState {
     Complete,
@@ -58,7 +58,7 @@ pub enum RecordState {
     UnsupportedFormat,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalCoverage {
     Complete,
@@ -66,7 +66,7 @@ pub enum LocalCoverage {
     Unsupported,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CellDetail {
     pub identity: CellIdentity,
@@ -81,19 +81,19 @@ pub struct CellDetail {
     pub overflow_page: Option<u32>,
     pub overflow_pointer: Option<ByteRange>,
     pub record: Option<RecordDetail>,
-    pub diagnostic: Option<&'static str>,
+    pub diagnostic: Option<std::borrow::Cow<'static, str>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Freeblock {
     pub offset: u32,
     pub next: u32,
     pub range: Option<ByteRange>,
-    pub diagnostic: Option<&'static str>,
+    pub diagnostic: Option<std::borrow::Cow<'static, str>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageDetail {
     pub allocation_role: Option<super::AllocationRole>,
@@ -103,7 +103,7 @@ pub struct PageDetail {
     pub regions: Vec<Region>,
     pub cells: Vec<CellDetail>,
     pub freeblocks: Vec<Freeblock>,
-    pub diagnostics: Vec<&'static str>,
+    pub diagnostics: Vec<std::borrow::Cow<'static, str>>,
     pub coverage: LocalCoverage,
 }
 
@@ -136,7 +136,7 @@ struct Page<'a> {
     schema_format: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     TableLeaf,
@@ -162,7 +162,7 @@ impl Page<'_> {
 
     fn region(&self, kind: &'static str, start: usize, end: usize) -> Region {
         Region {
-            kind,
+            kind: std::borrow::Cow::Borrowed(kind),
             range: self.range(start, end - start),
         }
     }
@@ -196,7 +196,9 @@ impl Page<'_> {
             _ => return detail,
         };
         if self.number == 1 && matches!(kind, Kind::IndexLeaf | Kind::IndexInterior) {
-            detail.diagnostics.push("invalid_page_one_kind");
+            detail
+                .diagnostics
+                .push(std::borrow::Cow::Borrowed("invalid_page_one_kind"));
             detail.coverage = LocalCoverage::Partial;
             return detail;
         }
@@ -210,7 +212,9 @@ impl Page<'_> {
         };
         let pointer_end = base + header_size + usize::from(count) * 2;
         if pointer_end > start || start > self.usable || self.bytes[base + 7] > 60 {
-            detail.diagnostics.push("invalid_btree_header");
+            detail
+                .diagnostics
+                .push(std::borrow::Cow::Borrowed("invalid_btree_header"));
             detail.coverage = LocalCoverage::Partial;
             return detail;
         }
@@ -255,7 +259,7 @@ impl Page<'_> {
             } else {
                 self.cell(kind, offset, &mut cell)
             };
-            cell.diagnostic = result.err();
+            cell.diagnostic = result.err().map(Into::into);
             detail.cells.push(cell);
         }
         self.freeblocks(&mut detail, start, usize::from(word(self.bytes, base + 1)));
@@ -288,13 +292,17 @@ impl Page<'_> {
         }
         while offset != 0 {
             if offset < start || offset + 4 > self.usable {
-                detail.diagnostics.push("invalid_freeblock_extent");
+                detail
+                    .diagnostics
+                    .push(std::borrow::Cow::Borrowed("invalid_freeblock_extent"));
                 break;
             }
             let next = usize::from(word(self.bytes, offset));
             let size = usize::from(word(self.bytes, offset + 2));
             if size < 4 || offset + size > self.usable {
-                detail.diagnostics.push("invalid_freeblock_extent");
+                detail
+                    .diagnostics
+                    .push(std::borrow::Cow::Borrowed("invalid_freeblock_extent"));
                 break;
             }
             detail.freeblocks.push(Freeblock {
@@ -316,13 +324,19 @@ impl Page<'_> {
                         .is_some_and(|range| (range.page_offset as usize) < offset)
                 })
             {
-                detail.diagnostics.push("freeblock_without_preceding_cell");
+                detail.diagnostics.push(std::borrow::Cow::Borrowed(
+                    "freeblock_without_preceding_cell",
+                ));
                 detail.freeblocks[0].range = None;
-                detail.freeblocks[0].diagnostic = Some("freeblock_without_preceding_cell");
+                detail.freeblocks[0].diagnostic = Some(std::borrow::Cow::Borrowed(
+                    "freeblock_without_preceding_cell",
+                ));
                 break;
             }
             if next != 0 && next < offset + size {
-                detail.diagnostics.push("invalid_freeblock_link");
+                detail
+                    .diagnostics
+                    .push(std::borrow::Cow::Borrowed("invalid_freeblock_link"));
                 break;
             }
             offset = next;
@@ -341,7 +355,7 @@ impl Page<'_> {
                     self.schema_format,
                 );
                 if record.state == RecordState::Invalid {
-                    cell.diagnostic = Some("invalid_record");
+                    cell.diagnostic = Some(std::borrow::Cow::Borrowed("invalid_record"));
                 }
                 cell.record = Some(record);
             }
@@ -381,12 +395,16 @@ impl Page<'_> {
             fragments.push((cursor, self.usable));
         }
         if fragments.iter().any(|(start, end)| end - start > 3) {
-            detail.diagnostics.push("untracked_free_space");
+            detail
+                .diagnostics
+                .push(std::borrow::Cow::Borrowed("untracked_free_space"));
             return;
         }
         let total: usize = fragments.iter().map(|(start, end)| end - start).sum();
         if total != usize::from(declared) {
-            detail.diagnostics.push("fragment_count_mismatch");
+            detail
+                .diagnostics
+                .push(std::borrow::Cow::Borrowed("fragment_count_mismatch"));
         }
         detail.regions.extend(
             fragments
@@ -511,7 +529,7 @@ fn contain_overlaps(detail: &mut PageDetail, content_start: usize, usable: usize
                 if index >= cells.len() {
                     let block = &mut detail.freeblocks[index - cells.len()];
                     block.range = None;
-                    block.diagnostic = Some("overlapping_allocation");
+                    block.diagnostic = Some(std::borrow::Cow::Borrowed("overlapping_allocation"));
                     continue;
                 }
                 let cell = &mut cells[index];
@@ -520,7 +538,7 @@ fn contain_overlaps(detail: &mut PageDetail, content_start: usize, usable: usize
                 cell.record = None;
                 cell.payload_size = None;
                 cell.local_payload = None;
-                cell.diagnostic = Some("overlapping_allocation");
+                cell.diagnostic = Some(std::borrow::Cow::Borrowed("overlapping_allocation"));
             }
         }
         start = end;
@@ -616,7 +634,8 @@ pub(super) fn read_page_with_cell_budget(
     number: u32,
     geometry: &DatabaseGeometry,
     remaining: u64,
-) -> Result<PageDetail, ()> {
+    max_resident_bytes: u64,
+) -> Result<PageDetail, super::CoverageReason> {
     let mut bytes = vec![0; geometry.page_size as usize];
     let offset = u64::from(number - 1) * u64::from(geometry.page_size);
     if file.read_exact_at(&mut bytes, offset).is_err() {
@@ -627,13 +646,30 @@ pub(super) fn read_page_with_cell_budget(
             regions: vec![],
             cells: vec![],
             freeblocks: vec![],
-            diagnostics: vec!["page_read_failed"],
+            diagnostics: vec![std::borrow::Cow::Borrowed("page_read_failed")],
             coverage: LocalCoverage::Partial,
         });
     }
     let base = if number == 1 { 100 } else { 0 };
     if matches!(bytes[base], 2 | 5 | 10 | 13) && u64::from(word(&bytes, base + 3)) > remaining {
-        return Err(());
+        return Err(super::CoverageReason::CellBudget);
+    }
+    let cells = if matches!(bytes[base], 2 | 5 | 10 | 13) {
+        u64::from(word(&bytes, base + 3))
+    } else {
+        0
+    };
+    // Cells are bounded by the pointer array, and record decoding follows overlap
+    // containment, so aggregate local record headers cannot exceed usable bytes.
+    let reservation = u64::from(geometry.page_size)
+        .saturating_mul(128)
+        .saturating_add(
+            cells
+                .saturating_mul(std::mem::size_of::<CellDetail>() as u64)
+                .saturating_mul(4),
+        );
+    if !super::budget::memory_available(max_resident_bytes, reservation) {
+        return Err(super::CoverageReason::ResidentMemoryBudget);
     }
     Ok(Page {
         bytes: &bytes,

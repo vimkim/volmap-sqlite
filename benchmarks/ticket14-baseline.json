@@ -1,0 +1,21 @@
+{
+  "commit": "9c73e11592956ce4f0012262829d3345c4337e56",
+  "platform": "Linux-5.14.0-570.30.1.el9_6.x86_64-x86_64-with-glibc2.34",
+  "profile": "debug",
+  "runs": [
+    {
+      "rows": 20000,
+      "stdout": "rows=20000 pages=235 cells=40110 elapsed_ms=945 VmHWM:\t   23524 kB\ninventory=Complete topology=Complete schema=Complete budgets=OperationalBudget { max_processed_cells: 1000000, max_phase_units: 1000000, max_resident_bytes: 268435456, max_freelist_trunks: 32768 }\n"
+    },
+    {
+      "rows": 100000,
+      "stdout": "rows=100000 pages=1203 cells=200562 elapsed_ms=1502 VmHWM:\t   95900 kB\ninventory=Complete topology=Budget schema=Partial budgets=OperationalBudget { max_processed_cells: 1000000, max_phase_units: 1000000, max_resident_bytes: 268435456, max_freelist_trunks: 32768 }\n"
+    },
+    {
+      "rows": 500000,
+      "stdout": "rows=500000 pages=3277 cells=543945 elapsed_ms=6861 VmHWM:\t  253968 kB\ninventory=ResidentMemoryBudget topology=Budget schema=Partial budgets=OperationalBudget { max_processed_cells: 1000000, max_phase_units: 1000000, max_resident_bytes: 268435456, max_freelist_trunks: 32768 }\n"
+    }
+  ],
+  "method": "Sequential separate processes using the existing budget_probe example and default budgets; VmHWM includes fixture generation and inspection. These are baseline observations, not acceptance measurements.",
+  "command": "cargo build --example budget_probe; target/debug/examples/budget_probe ROWS"
+}

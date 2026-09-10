@@ -16,7 +16,7 @@ export interface PointerMapEvidence {
 }
 
 export function PointerMap({ evidence, selectedPage, availablePages, onSelectPage }: {
-  evidence: PointerMapEvidence; selectedPage: number; availablePages: ReadonlyMap<number, unknown>; onSelectPage: (page: number) => void;
+  evidence: PointerMapEvidence; selectedPage: number; availablePages: Pick<ReadonlyMap<number, unknown>, "has">; onSelectPage: (page: number) => void;
 }) {
   const active = evidence.pages.find(page => page.page.pageNumber === selectedPage);
   return <section className="page-detail" aria-label="Pointer-map evidence">

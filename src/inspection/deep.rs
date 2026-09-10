@@ -175,21 +175,34 @@ fn fail(state: DeepState, reason: &'static str, coverage: &DeepCoverage) -> Fail
     }
 }
 
+pub(super) struct Source<'a> {
+    pub file: &'a File,
+    pub graph: &'a InspectionGraph,
+    pub pages: &'a super::storage::PageStore,
+}
+
 pub(super) fn inspect(
-    file: &File,
-    graph: &InspectionGraph,
+    source: &Source<'_>,
     target: &DeepSelector,
     budget: DeepBudget,
     checkpoint: &mut impl FnMut(&DeepCoverage) -> bool,
 ) -> Result<Decoded, Failure> {
+    let Source { file, graph, pages } = source;
     let mut coverage = DeepCoverage {
         phase: "payload",
         ..DeepCoverage::default()
     };
-    let cell = graph
-        .pages
-        .get(target.page_number.saturating_sub(1) as usize)
-        .and_then(|page| page.detail.cells.get(usize::from(target.cell_index)))
+    let page = pages
+        .get_admitted(
+            target.page_number.saturating_sub(1) as usize,
+            graph.operational_budget.max_resident_bytes,
+        )
+        .map_err(|error| page_read_failure(error, &coverage))?
+        .ok_or_else(|| fail(DeepState::InvalidTarget, "page_not_found", &coverage))?;
+    let cell = page
+        .detail
+        .cells
+        .get(usize::from(target.cell_index))
         .ok_or_else(|| fail(DeepState::InvalidTarget, "cell_not_found", &coverage))?;
     let local = cell
         .local_payload
@@ -218,7 +231,7 @@ pub(super) fn inspect(
             page_number: target.page_number,
         },
         range: local.clone(),
-        validation_rule: "selected_cell_payload",
+        validation_rule: std::borrow::Cow::Borrowed("selected_cell_payload"),
     };
     read_segment(
         file,
@@ -229,8 +242,7 @@ pub(super) fn inspect(
     )?;
     if u64::from(local.length) < size {
         read_overflow(
-            file,
-            graph,
+            source,
             target,
             budget,
             &mut payload,
@@ -268,6 +280,17 @@ pub(super) fn inspect(
         },
         values,
     })
+}
+
+fn page_read_failure(error: super::storage::StorageError, coverage: &DeepCoverage) -> Failure {
+    match error {
+        super::storage::StorageError::Budget => {
+            fail(DeepState::BudgetStopped, "resident_memory_budget", coverage)
+        }
+        super::storage::StorageError::Unavailable => {
+            fail(DeepState::Failed, "private_storage_unavailable", coverage)
+        }
+    }
 }
 
 fn decode_record(
@@ -453,7 +476,7 @@ fn field_source(
                 source.range.file_offset += u64::from(delta);
                 source.range.length =
                     u32::try_from(overlap_end - overlap_start).expect("bounded page extent");
-                source.validation_rule = "selected_record_field";
+                source.validation_rule = std::borrow::Cow::Borrowed("selected_record_field");
                 source
             });
             start = end;
@@ -506,37 +529,38 @@ fn read_segment(
 }
 
 fn read_overflow(
-    file: &File,
-    graph: &InspectionGraph,
+    source: &Source<'_>,
     target: &DeepSelector,
     budget: DeepBudget,
     payload: &mut Vec<u8>,
     coverage: &mut DeepCoverage,
     checkpoint: &mut impl FnMut(&DeepCoverage) -> bool,
 ) -> Result<(), Failure> {
-    use super::{EntityIdentity, PageRole, TraversalKind, TraversalStopReason};
+    use super::{EntityIdentity, PageRole, TraversalStopReason};
+    let Source { file, graph, pages } = source;
     let mut source = EntityIdentity::Cell {
         page_number: target.page_number,
         cell_index: target.cell_index,
     };
-    let mut found = None;
-    for (index, traversal) in graph.traversals.iter().enumerate() {
-        if index % 256 == 0 && !checkpoint(coverage) {
-            return Err(fail(DeepState::Cancelled, "cancelled", coverage));
-        }
-        if traversal.kind == TraversalKind::Overflow && traversal.origin == source {
-            found = Some(traversal);
-            break;
-        }
-    }
-    let traversal =
-        found.ok_or_else(|| fail(DeepState::Failed, "overflow_unavailable", coverage))?;
+    let traversal = selected_overflow(
+        pages,
+        &source,
+        graph.operational_budget.max_resident_bytes,
+        coverage,
+        checkpoint,
+    )?;
     let total = coverage
         .payload_bytes
         .as_deref()
         .and_then(|size| size.parse::<u64>().ok())
         .unwrap_or(0);
-    let links = overflow_links(graph, coverage, checkpoint)?;
+    let links = overflow_links(
+        pages,
+        &traversal,
+        budget.max_overflow_pages,
+        coverage,
+        checkpoint,
+    )?;
     for page in &traversal.validated_prefix {
         coverage.stopping_page = Some(page.page_number);
         coverage.stopping_payload_offset = Some(payload.len().to_string());
@@ -550,10 +574,14 @@ fn read_overflow(
                 coverage,
             ));
         }
-        let valid_role = page
-            .page_number
-            .checked_sub(1)
-            .and_then(|number| graph.pages.get(number as usize))
+        let valid_role = pages
+            .get_admitted(
+                page.page_number
+                    .checked_sub(1)
+                    .map_or(usize::MAX, |number| number as usize),
+                graph.operational_budget.max_resident_bytes,
+            )
+            .map_err(|error| page_read_failure(error, coverage))?
             .is_some_and(|page| {
                 page.classification.reconciled && page.classification.role == PageRole::Overflow
             });
@@ -606,6 +634,46 @@ fn read_overflow(
 
 type OverflowLink = (u32, Option<u16>, u32);
 
+fn selected_overflow(
+    pages: &super::storage::PageStore,
+    source: &super::EntityIdentity,
+    ceiling: u64,
+    coverage: &DeepCoverage,
+    checkpoint: &mut impl FnMut(&DeepCoverage) -> bool,
+) -> Result<super::Traversal, Failure> {
+    let page = overflow_link_key(source, 0).0;
+    let mut start = 0;
+    while let Some(position) = pages
+        .traversals
+        .page_position(page, start)
+        .map_err(|_| fail(DeepState::Failed, "private_storage_unavailable", coverage))?
+    {
+        if !checkpoint(coverage) {
+            return Err(fail(DeepState::Cancelled, "cancelled", coverage));
+        }
+        let reservation = pages
+            .traversals
+            .estimated_size(position)
+            .map_err(|_| fail(DeepState::Failed, "private_storage_unavailable", coverage))?;
+        if !super::budget::memory_available(ceiling, reservation) {
+            return Err(fail(
+                DeepState::BudgetStopped,
+                "resident_memory_budget",
+                coverage,
+            ));
+        }
+        let traversal = pages
+            .traversals
+            .get(position)
+            .ok_or_else(|| fail(DeepState::Failed, "private_storage_unavailable", coverage))?;
+        if traversal.kind == super::TraversalKind::Overflow && traversal.origin == *source {
+            return Ok(traversal);
+        }
+        start = position + 1;
+    }
+    Err(fail(DeepState::Failed, "overflow_unavailable", coverage))
+}
+
 fn overflow_link_key(source: &super::EntityIdentity, target: u32) -> OverflowLink {
     match source {
         super::EntityIdentity::Page { page_number } => (*page_number, None, target),
@@ -617,19 +685,44 @@ fn overflow_link_key(source: &super::EntityIdentity, target: u32) -> OverflowLin
 }
 
 fn overflow_links(
-    graph: &InspectionGraph,
+    pages: &super::storage::PageStore,
+    traversal: &super::Traversal,
+    max_pages: u32,
     coverage: &DeepCoverage,
     checkpoint: &mut impl FnMut(&DeepCoverage) -> bool,
 ) -> Result<std::collections::HashSet<OverflowLink>, Failure> {
+    let mut source = traversal.origin.clone();
     let mut links = std::collections::HashSet::new();
-    for (index, link) in graph.relationships.iter().enumerate() {
-        if index % 256 == 0 && !checkpoint(coverage) {
-            return Err(fail(DeepState::Cancelled, "cancelled", coverage));
+    for page in traversal.validated_prefix.iter().take(max_pages as usize) {
+        let wanted = overflow_link_key(&source, page.page_number);
+        let mut start = 0;
+        while let Some(position) = pages
+            .relationships
+            .page_position(wanted.0, start)
+            .map_err(|_| fail(DeepState::Failed, "private_storage_unavailable", coverage))?
+        {
+            if !checkpoint(coverage) {
+                return Err(fail(DeepState::Cancelled, "cancelled", coverage));
+            }
+            let link = pages
+                .relationships
+                .get(position)
+                .ok_or_else(|| fail(DeepState::Failed, "private_storage_unavailable", coverage))?;
+            if link.kind == super::RelationshipKind::Overflow
+                && overflow_link_key(&link.source, link.target.page_number) == wanted
+            {
+                links.insert(wanted);
+                break;
+            }
+            start = position + 1;
         }
-        if link.kind == super::RelationshipKind::Overflow {
-            links.insert(overflow_link_key(&link.source, link.target.page_number));
-        }
+        source = super::EntityIdentity::Page {
+            page_number: page.page_number,
+        };
     }
+    pages
+        .check()
+        .map_err(|_| fail(DeepState::Failed, "private_storage_unavailable", coverage))?;
     Ok(links)
 }
 

@@ -6,13 +6,13 @@ use serde::{Serialize, Serializer};
 
 use super::{ByteRange, DatabaseGeometry, PageEntity};
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageIdentity {
     pub page_number: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EntityIdentity {
     #[serde(rename_all = "camelCase")]
@@ -21,7 +21,7 @@ pub enum EntityIdentity {
     Cell { page_number: u32, cell_index: u16 },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationshipKind {
     BtreeChild,
@@ -30,7 +30,7 @@ pub enum RelationshipKind {
     Overflow,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationshipState {
     Validated,
@@ -40,15 +40,15 @@ pub enum RelationshipState {
     Terminal,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PhysicalEvidence {
     pub page: PageIdentity,
     pub range: ByteRange,
-    pub validation_rule: &'static str,
+    pub validation_rule: std::borrow::Cow<'static, str>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelationshipClaim {
     pub id: String,
@@ -61,7 +61,7 @@ pub struct RelationshipClaim {
     pub(super) stop_reason: Option<TraversalStopReason>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Relationship {
     pub claim_id: String,
@@ -70,7 +70,7 @@ pub struct Relationship {
     pub target: PageIdentity,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TraversalKind {
     Btree,
@@ -78,7 +78,7 @@ pub enum TraversalKind {
     Overflow,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TraversalStopReason {
     MissingTarget,
@@ -163,6 +163,7 @@ pub enum BudgetKind {
     HelperRecords,
     HelperTime,
     HelperOutputBytes,
+    SpillBytes,
 }
 
 fn budget_kind(value: u8) -> Option<BudgetKind> {
@@ -176,6 +177,7 @@ fn budget_kind(value: u8) -> Option<BudgetKind> {
         7 => Some(BudgetKind::HelperRecords),
         8 => Some(BudgetKind::HelperTime),
         9 => Some(BudgetKind::HelperOutputBytes),
+        10 => Some(BudgetKind::SpillBytes),
         _ => None,
     }
 }
@@ -195,6 +197,7 @@ pub struct WorkProgress {
 type WorkObserver = Box<dyn FnMut(&WorkProgress) -> super::ScanControl + Send>;
 
 pub(super) struct WorkControl {
+    storage: std::sync::Mutex<std::sync::Arc<super::storage::StoreContext>>,
     stop: AtomicU8,
     observer: std::sync::Mutex<Option<WorkObserver>>,
     history: std::sync::Mutex<Vec<WorkProgress>>,
@@ -216,6 +219,9 @@ pub(super) struct WorkControl {
 impl WorkControl {
     pub(super) fn new() -> Self {
         Self {
+            storage: std::sync::Mutex::new(std::sync::Arc::new(super::storage::StoreContext::new(
+                super::StorageBudget::default(),
+            ))),
             stop: AtomicU8::new(0),
             observer: std::sync::Mutex::new(None),
             history: std::sync::Mutex::new(Vec::new()),
@@ -233,6 +239,33 @@ impl WorkControl {
             phase_budget_exhausted: AtomicU8::new(0),
             aggregate_budget_exhausted: AtomicU8::new(0),
         }
+    }
+
+    fn attach_storage(&self, storage: &std::sync::Arc<super::storage::StoreContext>) {
+        *self
+            .storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = std::sync::Arc::clone(storage);
+    }
+
+    fn index<K: super::index_map::Key, V: Clone + Serialize + serde::de::DeserializeOwned>(
+        &self,
+    ) -> super::index_map::IndexMap<K, V> {
+        super::index_map::IndexMap::new(std::sync::Arc::clone(
+            &self
+                .storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        ))
+    }
+
+    fn sequence<T: super::index::StoredRecord>(&self) -> super::index::Sequence<T> {
+        super::index::Sequence::new(std::sync::Arc::clone(
+            &self
+                .storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        ))
     }
 
     pub(super) fn set_freelist_limit(&self, limit: u32) {
@@ -262,8 +295,47 @@ impl WorkControl {
         false
     }
 
+    pub(super) fn read_index<
+        K: super::index_map::Key,
+        V: Clone + Serialize + serde::de::DeserializeOwned,
+    >(
+        &self,
+        index: &super::index_map::IndexMap<K, V>,
+        key: &K,
+    ) -> Option<V> {
+        index.get_admitted(key, |bytes| {
+            self.reserve_memory(bytes.saturating_mul(2).saturating_add(64 * 1024))
+        })
+    }
+
     pub(super) fn set_memory_limit(&self, limit: u64) {
         self.max_resident_bytes.store(limit, Ordering::Release);
+    }
+
+    pub(super) fn read_record<T: super::index::StoredRecord>(
+        &self,
+        records: &super::index::Sequence<T>,
+        position: usize,
+    ) -> Option<T> {
+        if !records.admit_record(position, |bytes| {
+            self.reserve_memory(bytes.saturating_mul(2).saturating_add(64 * 1024))
+        }) {
+            return None;
+        }
+        records.get(position)
+    }
+
+    pub(super) fn edit_record<'a, T: super::index::StoredRecord>(
+        &self,
+        records: &'a mut super::index::Sequence<T>,
+        position: usize,
+    ) -> Option<super::index::RecordMut<'a, T>> {
+        if !records.admit_record(position, |bytes| {
+            self.reserve_memory(bytes.saturating_mul(2).saturating_add(64 * 1024))
+        }) {
+            return None;
+        }
+        records.get_mut(position)
     }
 
     pub(super) fn set_observer(&self, observer: WorkObserver) {
@@ -346,6 +418,16 @@ impl WorkControl {
                 super::ScanControl::Stop => self.stop(),
             }
         }
+        if matches!(
+            self.storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .check(),
+            Err(super::storage::StorageError::Budget)
+        ) {
+            self.stop_for_storage_budget();
+            return;
+        }
         let memory_limit = self.max_resident_bytes.load(Ordering::Acquire);
         let limit_kind = if memory_limit != u64::MAX
             && !super::budget::memory_available(memory_limit, 128 * 1024)
@@ -427,6 +509,13 @@ impl WorkControl {
         self.budget_exhausted.store(1, Ordering::Release);
         self.phase_budget_exhausted.store(1, Ordering::Release);
         self.limit_kind.store(kind as u8, Ordering::Release);
+    }
+
+    pub(super) fn stop_for_storage_budget(&self) {
+        self.mark_local_budget(BudgetKind::SpillBytes);
+        let _ = self
+            .stop
+            .compare_exchange(0, 3, Ordering::AcqRel, Ordering::Acquire);
     }
 
     pub(super) fn mark_aggregate_budget_exhausted(&self) {
@@ -664,7 +753,7 @@ impl Default for TraversalBudget {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TraversalStop {
     pub reason: TraversalStopReason,
@@ -672,7 +761,7 @@ pub struct TraversalStop {
     pub intended_target: Option<PageIdentity>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Traversal {
     pub kind: TraversalKind,
@@ -681,24 +770,24 @@ pub struct Traversal {
     pub stop: Option<TraversalStop>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticSeverity {
     Warning,
     Error,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Containment {
     TraversalStopped,
     RelationshipExcluded,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuralDiagnostic {
-    pub code: &'static str,
+    pub code: std::borrow::Cow<'static, str>,
     pub severity: DiagnosticSeverity,
     pub evidence: Vec<PhysicalEvidence>,
     pub affected_relationships: Vec<String>,
@@ -706,26 +795,48 @@ pub struct StructuralDiagnostic {
 }
 
 pub(super) struct Topology {
-    pub pointer_map: Option<super::PointerMapEvidence>,
-    pub classifications: Vec<super::PageClassification>,
+    pub freelist_trunks: super::index::Sequence<super::FreelistTrunk>,
+    pub page_overrides: super::index_map::IndexMap<u32, PageEntity>,
+    pub pointer_map: Option<super::pointer_map::StoredPointerMaps>,
+    pub classifications: super::index::Sequence<super::PageClassification>,
     pub freelist: super::FreelistEvidence,
-    pub claims: Vec<RelationshipClaim>,
-    pub relationships: Vec<Relationship>,
-    pub traversals: Vec<Traversal>,
-    pub diagnostics: Vec<StructuralDiagnostic>,
+    pub claims: super::index::Sequence<RelationshipClaim>,
+    pub relationships: super::index::Sequence<Relationship>,
+    pub traversals: super::index::Sequence<Traversal>,
+    pub diagnostics: super::index::Sequence<StructuralDiagnostic>,
     pub coverage: TopologyCoverage,
 }
 
 impl Topology {
+    pub(super) fn export_reservation(&self) -> Result<u64, super::storage::StorageError> {
+        let maps = self.pointer_map.as_ref().map_or(Ok(0), |maps| {
+            maps.pages
+                .estimated_total()
+                .map(|bytes| bytes.saturating_add((maps.pages.len() as u64).saturating_mul(128)))
+        })?;
+        Ok(self
+            .classifications
+            .estimated_total()?
+            .saturating_add(self.page_overrides.estimated_total()?)
+            .saturating_add(self.freelist_trunks.estimated_total()?)
+            .saturating_add(self.claims.estimated_total()?)
+            .saturating_add(self.relationships.estimated_total()?)
+            .saturating_add(self.traversals.estimated_total()?)
+            .saturating_add(self.diagnostics.estimated_total()?)
+            .saturating_add(maps))
+    }
+
     pub(super) fn empty(budget: TraversalBudget) -> Self {
         Self {
+            freelist_trunks: super::index::Sequence::default(),
+            page_overrides: super::index_map::IndexMap::default(),
             pointer_map: None,
-            classifications: vec![],
+            classifications: super::index::Sequence::default(),
             freelist: super::FreelistEvidence::uninspected(),
-            claims: Vec::new(),
-            relationships: Vec::new(),
-            traversals: Vec::new(),
-            diagnostics: Vec::new(),
+            claims: super::index::Sequence::default(),
+            relationships: super::index::Sequence::default(),
+            traversals: super::index::Sequence::default(),
+            diagnostics: super::index::Sequence::default(),
             coverage: TopologyCoverage {
                 reason: TopologyCoverageReason::Complete,
                 phase: TopologyPhase::Complete,
@@ -741,20 +852,20 @@ impl Topology {
 }
 
 struct OverflowTopology {
-    claims: Vec<RelationshipClaim>,
-    traversals: Vec<Traversal>,
-    diagnostics: Vec<StructuralDiagnostic>,
-    page_claims: std::collections::HashMap<u32, usize>,
+    claims: super::index::Sequence<RelationshipClaim>,
+    traversals: super::index::Sequence<Traversal>,
+    diagnostics: super::index::Sequence<StructuralDiagnostic>,
+    page_claims: super::index_map::IndexMap<u32, usize>,
     traversal_pages: u64,
 }
 
 impl OverflowTopology {
-    fn empty(traversal_pages: u64) -> Self {
+    fn empty(traversal_pages: u64, cancelled: &WorkControl) -> Self {
         Self {
-            claims: Vec::new(),
-            traversals: Vec::new(),
-            diagnostics: Vec::new(),
-            page_claims: std::collections::HashMap::new(),
+            claims: cancelled.sequence(),
+            traversals: cancelled.sequence(),
+            diagnostics: cancelled.sequence(),
+            page_claims: cancelled.index(),
             traversal_pages,
         }
     }
@@ -762,8 +873,8 @@ impl OverflowTopology {
 
 /// Topology sees allocation projections without cloning the structural inventory.
 struct PageInventory<'a> {
-    pages: &'a [PageEntity],
-    overrides: &'a std::collections::HashMap<u32, PageEntity>,
+    pages: &'a super::storage::PageStore,
+    overrides: &'a super::index_map::IndexMap<u32, PageEntity>,
 }
 
 impl PageInventory<'_> {
@@ -771,25 +882,16 @@ impl PageInventory<'_> {
         self.pages.len()
     }
 
-    fn get(&self, index: usize) -> Option<&PageEntity> {
+    fn get(&self, index: usize) -> Option<PageEntity> {
         self.pages
             .get(index)
             .map(|page| self.overrides.get(&page.number).unwrap_or(page))
     }
 
-    fn iter(&self) -> impl Iterator<Item = &PageEntity> {
+    fn iter(&self) -> impl Iterator<Item = PageEntity> {
         self.pages
             .iter()
             .map(|page| self.overrides.get(&page.number).unwrap_or(page))
-    }
-}
-
-impl std::ops::Index<usize> for PageInventory<'_> {
-    type Output = PageEntity;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        self.get(index)
-            .expect("index is bounded by the inspected inventory")
     }
 }
 
@@ -802,30 +904,25 @@ struct OverflowSource<'a> {
     cancelled: &'a WorkControl,
 }
 
-fn topology_reservation(pages: &[PageEntity], budget: TraversalBudget) -> u64 {
-    // Reserve headroom for page indexes, cell claims and bounded path copies before allocating them.
+fn topology_reservation(pages: &super::storage::PageStore) -> u64 {
+    // Reserve the shared cache and two decoded work units; indexes acquire their
+    // own cache reservations and spill instead of reserving a snapshot-sized Vec.
     pages
-        .iter()
-        .fold(0_u64, |n, page| {
-            n.saturating_add(8192)
-                .saturating_add((page.detail.cells.len() as u64).saturating_mul(2048))
-        })
-        .saturating_add(
-            budget
-                .max_total_pages()
-                .min((pages.len() as u64).saturating_mul(pages.len() as u64))
-                .saturating_mul(32),
-        )
+        .status()
+        .max_page_bytes
+        .saturating_mul(2)
+        .saturating_add(pages.context.budget.cache_bytes)
 }
 
 pub(super) fn inspect(
     file: &File,
     geometry: &DatabaseGeometry,
-    pages: &[PageEntity],
+    pages: &super::storage::PageStore,
     budget: TraversalBudget,
     cancelled: &WorkControl,
 ) -> Topology {
-    let reservation = topology_reservation(pages, budget);
+    cancelled.attach_storage(&pages.context);
+    let reservation = topology_reservation(pages);
     if !cancelled.reserve_memory(reservation) {
         let mut result = Topology::empty(budget);
         result.coverage = cancelled.coverage(budget);
@@ -839,7 +936,7 @@ pub(super) fn inspect(
     let original_pages = pages;
     let inventory = PageInventory {
         pages,
-        overrides: &allocation.freelist.page_overrides,
+        overrides: &allocation.page_overrides,
     };
     let pages = &inventory;
     let allocation_pages = u64::from(allocation.freelist.coverage.evaluated_pages);
@@ -861,10 +958,10 @@ pub(super) fn inspect(
             cancelled,
         )
     } else {
-        (Vec::new(), 0)
+        (cancelled.sequence(), 0)
     };
     let mut overflow = if cancelled.stopped() || cancelled.aggregate_budget_exhausted() {
-        OverflowTopology::empty(traversal_pages)
+        OverflowTopology::empty(traversal_pages, cancelled)
     } else {
         inspect_overflow(
             file,
@@ -877,7 +974,7 @@ pub(super) fn inspect(
     };
     let mut overflow_relationships =
         if cancelled.stopped() || cancelled.aggregate_budget_exhausted() {
-            Vec::new()
+            cancelled.sequence()
         } else {
             normalize_relationships(
                 &overflow.claims,
@@ -904,8 +1001,10 @@ pub(super) fn inspect(
     diagnostics.append(&mut allocation.diagnostics);
     let mut result = Topology {
         pointer_map: None,
-        classifications: vec![],
+        classifications: super::index::Sequence::default(),
         freelist: allocation.freelist,
+        freelist_trunks: allocation.freelist_trunks,
+        page_overrides: allocation.page_overrides,
         claims,
         relationships,
         traversals,
@@ -923,7 +1022,7 @@ pub(super) fn inspect(
 fn reconcile_page_roles(
     file: &File,
     geometry: &DatabaseGeometry,
-    pages: &[PageEntity],
+    pages: &super::storage::PageStore,
     result: &mut Topology,
     cancelled: &WorkControl,
 ) {
@@ -949,12 +1048,12 @@ fn reconcile_page_roles(
 }
 
 fn normalize_relationships(
-    claims: &[RelationshipClaim],
+    claims: &super::index::Sequence<RelationshipClaim>,
     phase: TopologyPhase,
     cancelled: &WorkControl,
-) -> (Vec<Relationship>, bool) {
+) -> (super::index::Sequence<Relationship>, bool) {
     cancelled.begin_phase(phase, Some(claims.len() as u64));
-    let mut relationships = Vec::new();
+    let mut relationships = cancelled.sequence();
     for claim in claims {
         if cancelled.stopped() {
             return (relationships, false);
@@ -976,8 +1075,8 @@ fn normalize_relationships(
 fn collect_btree_claims(
     pages: &PageInventory<'_>,
     cancelled: &WorkControl,
-) -> Vec<RelationshipClaim> {
-    let mut claims = Vec::new();
+) -> super::index::Sequence<RelationshipClaim> {
+    let mut claims = cancelled.sequence();
     cancelled.begin_phase(
         TopologyPhase::BtreeClaimCollection,
         Some(pages.len() as u64),
@@ -1012,7 +1111,9 @@ fn collect_btree_claims(
                             .left_child_pointer
                             .clone()
                             .expect("left-child value has source evidence"),
-                        validation_rule: "sqlite_btree_interior_left_child",
+                        validation_rule: std::borrow::Cow::Borrowed(
+                            "sqlite_btree_interior_left_child",
+                        ),
                     },
                     state: RelationshipState::Unresolved,
                     stop_reason: None,
@@ -1040,7 +1141,9 @@ fn collect_btree_claims(
                             file_offset: header.range.file_offset + 8,
                             length: 4,
                         },
-                        validation_rule: "sqlite_btree_interior_rightmost_child",
+                        validation_rule: std::borrow::Cow::Borrowed(
+                            "sqlite_btree_interior_rightmost_child",
+                        ),
                     },
                     state: RelationshipState::Unresolved,
                     stop_reason: None,
@@ -1056,31 +1159,37 @@ fn collect_btree_claims(
 fn validate_btree_claims(
     page_count: u32,
     pages: &PageInventory<'_>,
-    claims: &mut [RelationshipClaim],
+    claims: &mut super::index::Sequence<RelationshipClaim>,
     cancelled: &WorkControl,
-) -> Vec<StructuralDiagnostic> {
+) -> super::index::Sequence<StructuralDiagnostic> {
     cancelled.begin_phase(
         TopologyPhase::BtreeClaimValidation,
         Some(claims.len() as u64),
     );
-    let mut diagnostics = Vec::new();
+    let mut diagnostics = cancelled.sequence();
     for index in 0..claims.len() {
         if cancelled.stopped() {
             downgrade_validated_claims(claims, RelationshipKind::BtreeChild);
             return diagnostics;
         }
-        let claim = &mut claims[index];
-        if let Some(diagnostic) = validate_btree_claim(page_count, pages, claim) {
+        let Some(mut claim) = claims.get_mut(index) else {
+            return diagnostics;
+        };
+        if let Some(diagnostic) = validate_btree_claim(page_count, pages, &mut claim) {
             diagnostics.push(diagnostic);
         }
         cancelled.advance(TopologyPhase::BtreeClaimValidation);
     }
     cancelled.finish_phase(TopologyPhase::BtreeClaimValidation);
     if !cancelled.stopped() {
-        diagnostics.extend(mark_duplicate_btree_parents(pages.len(), claims, cancelled));
+        diagnostics.append(&mut mark_duplicate_btree_parents(
+            pages.len(),
+            claims,
+            cancelled,
+        ));
     }
     if !cancelled.stopped() {
-        diagnostics.extend(mark_btree_cycles(pages.len(), claims, cancelled));
+        diagnostics.append(&mut mark_btree_cycles(pages.len(), claims, cancelled));
     }
     if cancelled.stopped() {
         downgrade_validated_claims(claims, RelationshipKind::BtreeChild);
@@ -1088,8 +1197,14 @@ fn validate_btree_claims(
     diagnostics
 }
 
-fn downgrade_validated_claims(claims: &mut [RelationshipClaim], kind: RelationshipKind) {
-    for claim in claims {
+fn downgrade_validated_claims(
+    claims: &mut super::index::Sequence<RelationshipClaim>,
+    kind: RelationshipKind,
+) {
+    for index in 0..claims.len() {
+        let Some(mut claim) = claims.get_mut(index) else {
+            return;
+        };
         if claim.kind == kind && claim.state == RelationshipState::Validated {
             claim.state = RelationshipState::Unresolved;
             claim.stop_reason = None;
@@ -1103,72 +1218,77 @@ fn validate_btree_claim(
     claim: &mut RelationshipClaim,
 ) -> Option<StructuralDiagnostic> {
     let source_number = source_page(&claim.source);
+    let source_page = pages.get((source_number - 1) as usize)?;
     let source_cell = match claim.source {
-        EntityIdentity::Cell { cell_index, .. } => pages[(source_number - 1) as usize]
-            .detail
-            .cells
-            .get(cell_index as usize),
+        EntityIdentity::Cell { cell_index, .. } => {
+            source_page.detail.cells.get(cell_index as usize)
+        }
         EntityIdentity::Page { .. } => None,
     };
-    let (state, reason, code) =
-        if source_cell.is_some_and(|cell| cell.diagnostic == Some("overlapping_allocation")) {
+    let (state, reason, code) = if source_cell.is_some_and(|cell| {
+        cell.diagnostic == Some(std::borrow::Cow::Borrowed("overlapping_allocation"))
+    }) {
+        (
+            RelationshipState::Invalid,
+            TraversalStopReason::OverlappingExtent,
+            "btree_child_overlapping_source",
+        )
+    } else {
+        let target = claim.target.as_ref().expect("B-tree claim has a target");
+        if target.page_number == 0 {
             (
                 RelationshipState::Invalid,
-                TraversalStopReason::OverlappingExtent,
-                "btree_child_overlapping_source",
+                TraversalStopReason::InvalidReference,
+                "btree_child_invalid_page",
             )
-        } else {
-            let target = claim.target.as_ref().expect("B-tree claim has a target");
-            if target.page_number == 0 {
-                (
-                    RelationshipState::Invalid,
-                    TraversalStopReason::InvalidReference,
-                    "btree_child_invalid_page",
-                )
-            } else if target.page_number > page_count {
-                (
-                    RelationshipState::Unresolved,
-                    TraversalStopReason::OutOfRange,
-                    "btree_child_out_of_range",
-                )
-            } else if let Some(target_page) = pages.get((target.page_number - 1) as usize) {
-                if target_page.detail.diagnostics.contains(&"page_read_failed") {
-                    claim.state = RelationshipState::Unresolved;
-                    claim.stop_reason = Some(TraversalStopReason::MissingTarget);
-                    return Some(diagnostic(
-                        "btree_child_missing",
-                        claim,
-                        Containment::TraversalStopped,
-                    ));
-                }
-                if matches!(
-                    target_page.classification.role,
-                    super::PageRole::PointerMap | super::PageRole::LockByte
-                ) {
-                    claim.state = RelationshipState::Conflicting;
-                    claim.stop_reason = Some(TraversalStopReason::ConflictingClaim);
-                    return Some(diagnostic(
-                        "btree_reserved_page_conflict",
-                        claim,
-                        Containment::TraversalStopped,
-                    ));
-                }
-                let source_kind = pages[(source_number - 1) as usize].detail.kind;
-                if compatible_btree_kinds(source_kind, target_page.detail.kind) {
-                    claim.state = RelationshipState::Validated;
-                    return None;
-                }
-                (
-                    RelationshipState::Invalid,
-                    TraversalStopReason::TypeMismatch,
-                    "btree_child_type_mismatch",
-                )
-            } else {
+        } else if target.page_number > page_count {
+            (
+                RelationshipState::Unresolved,
+                TraversalStopReason::OutOfRange,
+                "btree_child_out_of_range",
+            )
+        } else if let Some(target_page) = pages.get((target.page_number - 1) as usize) {
+            if target_page
+                .detail
+                .diagnostics
+                .contains(&"page_read_failed".into())
+            {
                 claim.state = RelationshipState::Unresolved;
-                claim.stop_reason = Some(TraversalStopReason::CoverageStop);
+                claim.stop_reason = Some(TraversalStopReason::MissingTarget);
+                return Some(diagnostic(
+                    "btree_child_missing",
+                    claim,
+                    Containment::TraversalStopped,
+                ));
+            }
+            if matches!(
+                target_page.classification.role,
+                super::PageRole::PointerMap | super::PageRole::LockByte
+            ) {
+                claim.state = RelationshipState::Conflicting;
+                claim.stop_reason = Some(TraversalStopReason::ConflictingClaim);
+                return Some(diagnostic(
+                    "btree_reserved_page_conflict",
+                    claim,
+                    Containment::TraversalStopped,
+                ));
+            }
+            let source_kind = source_page.detail.kind;
+            if compatible_btree_kinds(source_kind, target_page.detail.kind) {
+                claim.state = RelationshipState::Validated;
                 return None;
             }
-        };
+            (
+                RelationshipState::Invalid,
+                TraversalStopReason::TypeMismatch,
+                "btree_child_type_mismatch",
+            )
+        } else {
+            claim.state = RelationshipState::Unresolved;
+            claim.stop_reason = Some(TraversalStopReason::CoverageStop);
+            return None;
+        }
+    };
     claim.state = state;
     claim.stop_reason = Some(reason);
     Some(diagnostic(code, claim, Containment::TraversalStopped))
@@ -1176,22 +1296,29 @@ fn validate_btree_claim(
 
 fn mark_duplicate_btree_parents(
     page_count: usize,
-    claims: &mut [RelationshipClaim],
+    claims: &mut super::index::Sequence<RelationshipClaim>,
     cancelled: &WorkControl,
-) -> Vec<StructuralDiagnostic> {
+) -> super::index::Sequence<StructuralDiagnostic> {
     cancelled.begin_phase(TopologyPhase::BtreeParentReconciliation, None);
-    let mut incoming = vec![Vec::new(); page_count + 1];
+    let mut incoming: super::index_map::IndexMap<u32, Vec<usize>> = cancelled.index();
     for (index, claim) in claims.iter().enumerate() {
         if cancelled.stopped() {
-            return Vec::new();
+            return cancelled.sequence();
         }
         if claim.state == RelationshipState::Validated {
-            incoming[claim.target.as_ref().unwrap().page_number as usize].push(index);
+            let target = claim.target.as_ref().unwrap().page_number;
+            let mut indexes = cancelled.read_index(&incoming, &target).unwrap_or_default();
+            if cancelled.stopped() {
+                return cancelled.sequence();
+            }
+            indexes.push(index);
+            incoming.insert(target, indexes);
         }
         cancelled.advance(TopologyPhase::BtreeParentReconciliation);
     }
-    let mut diagnostics = Vec::new();
-    for indexes in incoming {
+    let mut diagnostics = cancelled.sequence();
+    for target in 0..=u32::try_from(page_count).expect("bounded page count") {
+        let indexes = cancelled.read_index(&incoming, &target).unwrap_or_default();
         if cancelled.stopped() {
             return diagnostics;
         }
@@ -1217,42 +1344,52 @@ fn mark_duplicate_btree_parents(
 
 fn mark_btree_cycles(
     page_count: usize,
-    claims: &mut [RelationshipClaim],
+    claims: &mut super::index::Sequence<RelationshipClaim>,
     cancelled: &WorkControl,
-) -> Vec<StructuralDiagnostic> {
+) -> super::index::Sequence<StructuralDiagnostic> {
     cancelled.begin_phase(TopologyPhase::BtreeCycleReconciliation, None);
     let cycles = btree_cycles(page_count, claims, cancelled);
     if cancelled.stopped() {
-        return Vec::new();
+        return cancelled.sequence();
     }
-    let mut cycle_by_page = vec![None; page_count + 1];
+    let mut cycle_by_page = cancelled.index();
     for (cycle_index, cycle) in cycles.iter().enumerate() {
         for page in cycle {
             if cancelled.stopped() {
-                return Vec::new();
+                return cancelled.sequence();
             }
-            cycle_by_page[*page as usize] = Some(cycle_index);
+            cycle_by_page.insert(page, cycle_index);
             cancelled.advance(TopologyPhase::BtreeCycleReconciliation);
         }
     }
-    let mut indexes_by_cycle = vec![Vec::new(); cycles.len()];
+    let mut indexes_by_cycle: super::index_map::IndexMap<usize, Vec<usize>> = cancelled.index();
     for (index, claim) in claims.iter().enumerate() {
         if cancelled.stopped() {
-            return Vec::new();
+            return cancelled.sequence();
         }
         if claim.state == RelationshipState::Validated {
-            let source_cycle = cycle_by_page[source_page(&claim.source) as usize];
-            let target_cycle = cycle_by_page[claim.target.as_ref().unwrap().page_number as usize];
+            let source_cycle = cycle_by_page.get(&source_page(&claim.source));
+            let target_cycle = cycle_by_page.get(&claim.target.as_ref().unwrap().page_number);
             if let Some(cycle) = source_cycle
                 && source_cycle == target_cycle
             {
-                indexes_by_cycle[cycle].push(index);
+                let mut indexes = cancelled
+                    .read_index(&indexes_by_cycle, &cycle)
+                    .unwrap_or_default();
+                if cancelled.stopped() {
+                    return cancelled.sequence();
+                }
+                indexes.push(index);
+                indexes_by_cycle.insert(cycle, indexes);
             }
         }
         cancelled.advance(TopologyPhase::BtreeCycleReconciliation);
     }
-    let mut diagnostics = Vec::new();
-    for indexes in indexes_by_cycle {
+    let mut diagnostics = cancelled.sequence();
+    for cycle in 0..cycles.len() {
+        let indexes = cancelled
+            .read_index(&indexes_by_cycle, &cycle)
+            .unwrap_or_default();
         let Some(diagnostic) = conflicting_claims_bounded(
             claims,
             &indexes,
@@ -1271,7 +1408,7 @@ fn mark_btree_cycles(
 }
 
 fn conflicting_claims_bounded(
-    claims: &mut [RelationshipClaim],
+    claims: &mut super::index::Sequence<RelationshipClaim>,
     indexes: &[usize],
     code: &'static str,
     reason: TraversalStopReason,
@@ -1279,32 +1416,38 @@ fn conflicting_claims_bounded(
     cancelled: &WorkControl,
     phase: TopologyPhase,
 ) -> Option<StructuralDiagnostic> {
+    // Include the evidence, IDs, mutation journal and serialization headroom before
+    // allocating any of the high-degree diagnostic's vectors.
+    if !cancelled.reserve_memory((indexes.len() as u64).saturating_mul(2048)) {
+        return None;
+    }
     let mut evidence = Vec::with_capacity(indexes.len());
     let mut affected_relationships = Vec::with_capacity(indexes.len());
     for index in indexes {
         if cancelled.stopped() {
             return None;
         }
-        evidence.push(claims[*index].evidence.clone());
-        affected_relationships.push(claims[*index].id.clone());
+        let claim = claims.get(*index)?;
+        evidence.push(claim.evidence);
+        affected_relationships.push(claim.id);
         cancelled.advance(phase);
     }
     let mut changed: Vec<usize> = Vec::with_capacity(indexes.len());
     for index in indexes {
         if cancelled.stopped() {
             for changed_index in changed {
-                claims[changed_index].state = RelationshipState::Validated;
-                claims[changed_index].stop_reason = None;
+                claims.get_mut(changed_index)?.state = RelationshipState::Validated;
+                claims.get_mut(changed_index)?.stop_reason = None;
             }
             return None;
         }
-        claims[*index].state = RelationshipState::Conflicting;
-        claims[*index].stop_reason = Some(reason);
+        claims.get_mut(*index)?.state = RelationshipState::Conflicting;
+        claims.get_mut(*index)?.stop_reason = Some(reason);
         changed.push(*index);
         cancelled.advance(phase);
     }
     Some(StructuralDiagnostic {
-        code,
+        code: std::borrow::Cow::Borrowed(code),
         severity: DiagnosticSeverity::Error,
         evidence,
         affected_relationships,
@@ -1320,7 +1463,7 @@ fn inspect_overflow(
     traversal_pages: u64,
     cancelled: &WorkControl,
 ) -> OverflowTopology {
-    let mut result = OverflowTopology::empty(traversal_pages);
+    let mut result = OverflowTopology::empty(traversal_pages, cancelled);
     let source = OverflowSource {
         file,
         geometry,
@@ -1404,12 +1547,12 @@ fn inspect_overflow_cell(
         evidence: PhysicalEvidence {
             page: PageIdentity { page_number },
             range: pointer,
-            validation_rule: "sqlite_btree_first_overflow_page",
+            validation_rule: std::borrow::Cow::Borrowed("sqlite_btree_first_overflow_page"),
         },
         state: RelationshipState::Unresolved,
         stop_reason: None,
     };
-    if cell.diagnostic == Some("overlapping_allocation") {
+    if cell.diagnostic == Some(std::borrow::Cow::Borrowed("overlapping_allocation")) {
         invalidate_overflow_claim(
             &mut first,
             RelationshipState::Invalid,
@@ -1429,7 +1572,10 @@ fn inspect_overflow_cell(
     }
     let first_claim_index = topology.claims.len();
     topology.claims.push(first);
-    let claim = &topology.claims[first_claim_index];
+    let Some(claim) = topology.claims.get(first_claim_index) else {
+        return false;
+    };
+    let claim = &claim;
     if claim.state != RelationshipState::Validated {
         topology
             .traversals
@@ -1470,6 +1616,42 @@ fn inspect_overflow_cell(
     )
 }
 
+fn admit_overflow_step(
+    source: &OverflowSource<'_>,
+    origin: &EntityIdentity,
+    prefix: &mut Vec<PageIdentity>,
+    incoming: usize,
+    topology: &mut OverflowTopology,
+) -> bool {
+    if prefix.len().is_multiple_of(256) {
+        // Include serialization headroom for this one selected traversal record.
+        source
+            .cancelled
+            .reserve_memory((prefix.len() as u64 + 256).saturating_mul(128));
+    }
+    if source.cancelled.stopped() {
+        record_cancelled_overflow(
+            source,
+            origin.clone(),
+            std::mem::take(prefix),
+            incoming,
+            topology,
+        );
+        return false;
+    }
+    if topology.traversal_pages >= source.max_total_pages {
+        stop_at_overflow_aggregate_budget(
+            source,
+            origin.clone(),
+            std::mem::take(prefix),
+            incoming,
+            topology,
+        );
+        return false;
+    }
+    true
+}
+
 fn follow_overflow_chain(
     source: &OverflowSource<'_>,
     origin: EntityIdentity,
@@ -1481,25 +1663,14 @@ fn follow_overflow_chain(
     let mut current = first_page;
     let mut incoming_claim_index = first_claim_index;
     let mut prefix = Vec::new();
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = source.cancelled.index();
     loop {
-        if source.cancelled.stopped() {
-            record_cancelled_overflow(source, origin, prefix, incoming_claim_index, topology);
-            return false;
-        }
-        if topology.traversal_pages >= source.max_total_pages {
-            stop_at_overflow_aggregate_budget(
-                source,
-                origin,
-                prefix,
-                incoming_claim_index,
-                topology,
-            );
+        if !admit_overflow_step(source, &origin, &mut prefix, incoming_claim_index, topology) {
             return false;
         }
         topology.traversal_pages += 1;
         assert!(
-            visited.insert(current),
+            visited.insert(current, ()).is_none(),
             "overflow cycle escaped containment"
         );
         prefix.push(PageIdentity {
@@ -1507,7 +1678,9 @@ fn follow_overflow_chain(
         });
         remaining = remaining.saturating_sub(u64::from(source.geometry.usable_size - 4));
         let claim_index = overflow_next_claim(source, current, topology);
-        let mut claim = topology.claims[claim_index].clone();
+        let Some(mut claim) = topology.claims.get(claim_index) else {
+            return false;
+        };
         match claim.state {
             RelationshipState::Terminal if remaining == 0 => {
                 topology.traversals.push(complete_overflow(origin, prefix));
@@ -1541,10 +1714,15 @@ fn follow_overflow_chain(
                     .as_ref()
                     .expect("validated overflow claim has a target")
                     .page_number;
-                if visited.contains(&next) {
+                if visited.contains_key(&next) {
                     claim.state = RelationshipState::Conflicting;
                     claim.stop_reason = Some(TraversalStopReason::Cycle);
-                    topology.claims[claim_index] = claim.clone();
+                    if !topology
+                        .claims
+                        .edit(claim_index, |stored| *stored = claim.clone())
+                    {
+                        return false;
+                    }
                     record_overflow_stop(
                         topology,
                         origin,
@@ -1591,7 +1769,10 @@ fn stop_at_overflow_aggregate_budget(
     let traversal = stopped_overflow_traversal_with_reason(
         origin,
         prefix,
-        &topology.claims[claim_index],
+        &match topology.claims.get(claim_index) {
+            Some(claim) => claim,
+            None => return,
+        },
         TraversalStopReason::Budget,
     );
     topology.traversals.push(traversal);
@@ -1607,7 +1788,10 @@ fn record_cancelled_overflow(
     let traversal = stopped_overflow_traversal_with_reason(
         origin,
         prefix,
-        &topology.claims[claim_index],
+        &match topology.claims.get(claim_index) {
+            Some(claim) => claim,
+            None => return,
+        },
         source
             .cancelled
             .traversal_reason()
@@ -1649,7 +1833,7 @@ fn overflow_next_claim(
     topology: &mut OverflowTopology,
 ) -> usize {
     if let Some(index) = topology.page_claims.get(&current) {
-        return *index;
+        return index;
     }
     let evidence = PhysicalEvidence {
         page: PageIdentity {
@@ -1660,7 +1844,7 @@ fn overflow_next_claim(
             file_offset: u64::from(current - 1) * u64::from(source.geometry.page_size),
             length: 4,
         },
-        validation_rule: "sqlite_overflow_next_page",
+        validation_rule: std::borrow::Cow::Borrowed("sqlite_overflow_next_page"),
     };
     let next = read_u32(source.file, evidence.range.file_offset);
     let mut claim = RelationshipClaim {
@@ -1706,22 +1890,29 @@ fn overflow_next_claim(
 
 fn reconcile_overflow_owners(topology: &mut OverflowTopology, cancelled: &WorkControl) -> bool {
     cancelled.begin_phase(TopologyPhase::OverflowReconciliation, None);
-    let mut incoming = std::collections::BTreeMap::<u32, Vec<usize>>::new();
+    let mut incoming: super::index_map::IndexMap<u32, Vec<usize>> = cancelled.index();
     for (index, claim) in topology.claims.iter().enumerate() {
         if cancelled.stopped() {
             return false;
         }
         if claim.state == RelationshipState::Validated {
-            incoming
-                .entry(claim.target.as_ref().unwrap().page_number)
-                .or_default()
-                .push(index);
+            let target = claim.target.as_ref().unwrap().page_number;
+            let mut indexes = cancelled.read_index(&incoming, &target).unwrap_or_default();
+            if cancelled.stopped() {
+                return false;
+            }
+            indexes.push(index);
+            incoming.insert(target, indexes);
         }
         cancelled.advance(TopologyPhase::OverflowReconciliation);
     }
-    let mut cell_boundaries = std::collections::HashMap::new();
-    let mut page_boundaries = std::collections::HashMap::new();
-    for indexes in incoming.into_values().filter(|indexes| indexes.len() > 1) {
+    let mut cell_boundaries = cancelled.index();
+    let mut page_boundaries = cancelled.index();
+    for target in incoming.keys() {
+        let indexes = cancelled.read_index(&incoming, &target).unwrap_or_default();
+        if indexes.len() < 2 {
+            continue;
+        }
         let Some(diagnostic) = conflicting_claims_bounded(
             &mut topology.claims,
             &indexes,
@@ -1738,13 +1929,15 @@ fn reconcile_overflow_owners(topology: &mut OverflowTopology, cancelled: &WorkCo
             if cancelled.stopped() {
                 return false;
             }
-            let claim = &topology.claims[*index];
+            let Some(claim) = topology.claims.get(*index) else {
+                return false;
+            };
             match claim.source {
                 EntityIdentity::Cell {
                     page_number,
                     cell_index,
                 } => {
-                    cell_boundaries.insert((page_number, cell_index), *index);
+                    cell_boundaries.insert((page_number, u32::from(cell_index)), *index);
                 }
                 EntityIdentity::Page { page_number } => {
                     page_boundaries.insert(page_number, *index);
@@ -1753,7 +1946,10 @@ fn reconcile_overflow_owners(topology: &mut OverflowTopology, cancelled: &WorkCo
             cancelled.advance(TopologyPhase::OverflowReconciliation);
         }
     }
-    for traversal in &mut topology.traversals {
+    for position in 0..topology.traversals.len() {
+        let Some(mut traversal) = topology.traversals.get_mut(position) else {
+            return false;
+        };
         if cancelled.stopped() {
             return false;
         }
@@ -1762,8 +1958,7 @@ fn reconcile_overflow_owners(topology: &mut OverflowTopology, cancelled: &WorkCo
                 page_number,
                 cell_index,
             } => cell_boundaries
-                .get(&(page_number, cell_index))
-                .copied()
+                .get(&(page_number, u32::from(cell_index)))
                 .map(|index| (0, index)),
             EntityIdentity::Page { .. } => None,
         };
@@ -1774,12 +1969,14 @@ fn reconcile_overflow_owners(topology: &mut OverflowTopology, cancelled: &WorkCo
             }
             cancelled.advance(TopologyPhase::OverflowReconciliation);
             if let Some(index) = page_boundaries.get(&page.page_number) {
-                page_boundary = Some((position + 1, *index));
+                page_boundary = Some((position + 1, index));
                 break;
             }
         }
         if let Some((boundary, index)) = origin_boundary.or(page_boundary) {
-            let claim = &topology.claims[index];
+            let Some(claim) = topology.claims.get(index) else {
+                return false;
+            };
             traversal.validated_prefix.truncate(boundary);
             traversal.stop = Some(TraversalStop {
                 reason: TraversalStopReason::ConflictingClaim,
@@ -1805,7 +2002,7 @@ fn validate_overflow_target(
     claim: &mut RelationshipClaim,
     missing_code: &'static str,
     out_of_range_code: &'static str,
-    diagnostics: &mut Vec<StructuralDiagnostic>,
+    diagnostics: &mut super::index::Sequence<StructuralDiagnostic>,
 ) {
     let Some(target) = &claim.target else {
         invalidate_overflow_claim(
@@ -1832,7 +2029,7 @@ fn validate_overflow_target(
         claim.stop_reason = Some(TraversalStopReason::CoverageStop);
         return;
     };
-    if page.detail.diagnostics.contains(&"page_read_failed") {
+    if page.detail.diagnostics.contains(&"page_read_failed".into()) {
         invalidate_overflow_claim(
             claim,
             RelationshipState::Unresolved,
@@ -1866,7 +2063,7 @@ fn invalidate_overflow_claim(
     state: RelationshipState,
     reason: TraversalStopReason,
     code: &'static str,
-    diagnostics: &mut Vec<StructuralDiagnostic>,
+    diagnostics: &mut super::index::Sequence<StructuralDiagnostic>,
 ) {
     claim.state = state;
     claim.stop_reason = Some(reason);
@@ -1914,7 +2111,7 @@ fn diagnostic(
     containment: Containment,
 ) -> StructuralDiagnostic {
     StructuralDiagnostic {
-        code,
+        code: std::borrow::Cow::Borrowed(code),
         severity: DiagnosticSeverity::Error,
         evidence: vec![claim.evidence.clone()],
         affected_relationships: vec![claim.id.clone()],
@@ -1924,50 +2121,59 @@ fn diagnostic(
 
 fn btree_cycles(
     page_count: usize,
-    claims: &[RelationshipClaim],
+    claims: &super::index::Sequence<RelationshipClaim>,
     cancelled: &WorkControl,
-) -> Vec<Vec<u32>> {
-    let mut parent = vec![None; page_count + 1];
+) -> super::index::Sequence<Vec<u32>> {
+    let mut parent = cancelled.index();
     for claim in claims {
         if cancelled.stopped() {
-            return Vec::new();
+            return cancelled.sequence();
         }
         if claim.state == RelationshipState::Validated {
-            parent[claim.target.as_ref().unwrap().page_number as usize] =
-                Some(source_page(&claim.source));
+            parent.insert(
+                claim.target.as_ref().unwrap().page_number,
+                source_page(&claim.source),
+            );
         }
         cancelled.advance(TopologyPhase::BtreeCycleReconciliation);
     }
-    let mut done = vec![false; page_count + 1];
-    let mut cycles = Vec::new();
+    let mut done = cancelled.index();
+    let mut cycles = cancelled.sequence();
     for start in 1..=page_count {
         if cancelled.stopped() {
             return cycles;
         }
-        if done[start] {
+        if done.contains_key(&u32::try_from(start).expect("bounded page count")) {
             cancelled.advance(TopologyPhase::BtreeCycleReconciliation);
             continue;
         }
-        let mut path = Vec::new();
-        let mut positions = std::collections::HashMap::new();
+        let mut path = cancelled.sequence();
+        let mut positions = cancelled.index();
         let mut current = u32::try_from(start).expect("page inventory is bounded by u32");
-        while current != 0 && !done[current as usize] {
+        while current != 0 && !done.contains_key(&current) {
             if cancelled.stopped() {
                 return cycles;
             }
             cancelled.advance(TopologyPhase::BtreeCycleReconciliation);
             if let Some(position) = positions.insert(current, path.len()) {
-                cycles.push(path[position..].to_vec());
+                if !cancelled.reserve_memory((path.len() - position) as u64 * 8) {
+                    return cycles;
+                }
+                cycles.push(
+                    (position..path.len())
+                        .map_while(|index| path.get(index))
+                        .collect(),
+                );
                 break;
             }
             path.push(current);
-            current = parent[current as usize].unwrap_or(0);
+            current = parent.get(&current).unwrap_or(0);
         }
         for page in path {
             if cancelled.stopped() {
                 return cycles;
             }
-            done[page as usize] = true;
+            done.insert(page, true);
             cancelled.advance(TopologyPhase::BtreeCycleReconciliation);
         }
         cancelled.advance(TopologyPhase::BtreeCycleReconciliation);
@@ -1977,21 +2183,21 @@ fn btree_cycles(
 
 fn btree_traversals(
     pages: &PageInventory<'_>,
-    claims: &[RelationshipClaim],
+    claims: &super::index::Sequence<RelationshipClaim>,
     inventory_complete: bool,
     max_pages: u32,
     max_total_pages: u64,
     cancelled: &WorkControl,
-) -> (Vec<Traversal>, u64) {
+) -> (super::index::Sequence<Traversal>, u64) {
     cancelled.begin_phase(TopologyPhase::BtreeTraversal, None);
     let mut traversal_pages = 0;
-    let Some((incoming, outgoing)) = btree_adjacency(pages.len(), claims, cancelled) else {
-        return (Vec::new(), traversal_pages);
+    let Some(BtreeAdjacency { incoming, outgoing }) = btree_adjacency(claims, cancelled) else {
+        return (cancelled.sequence(), traversal_pages);
     };
-    let mut traversals = Vec::new();
+    let mut traversals = cancelled.sequence();
     for root in pages.iter().filter(|page| {
         page.detail.kind.is_some()
-            && !incoming[page.number as usize]
+            && !incoming.contains_key(&page.number)
             && (inventory_complete || page.number == 1)
     }) {
         if cancelled.stopped() {
@@ -2012,8 +2218,11 @@ fn btree_traversals(
         )];
         while let Some((page_number, prefix)) = pending.pop() {
             if cancelled.stopped() {
-                if let Some(index) = outgoing[page_number as usize].first() {
-                    let claim = &claims[*index];
+                if let Some(index) = outgoing.get(&page_number).unwrap_or_default().first() {
+                    let Some(claim) = claims.get(*index) else {
+                        return (traversals, traversal_pages);
+                    };
+                    let claim = &claim;
                     traversals.push(Traversal {
                         kind: TraversalKind::Btree,
                         origin: origin.clone(),
@@ -2030,7 +2239,7 @@ fn btree_traversals(
                 return (traversals, traversal_pages);
             }
             cancelled.advance(TopologyPhase::BtreeTraversal);
-            if outgoing[page_number as usize].is_empty() {
+            if outgoing.get(&page_number).unwrap_or_default().is_empty() {
                 traversals.push(Traversal {
                     kind: TraversalKind::Btree,
                     origin: origin.clone(),
@@ -2062,29 +2271,39 @@ fn btree_traversals(
     (traversals, traversal_pages)
 }
 
+struct BtreeAdjacency {
+    incoming: super::index_map::IndexMap<u32, bool>,
+    outgoing: super::index_map::IndexMap<u32, Vec<usize>>,
+}
+
 fn btree_adjacency(
-    page_count: usize,
-    claims: &[RelationshipClaim],
+    claims: &super::index::Sequence<RelationshipClaim>,
     cancelled: &WorkControl,
-) -> Option<(Vec<bool>, Vec<Vec<usize>>)> {
-    let mut incoming = vec![false; page_count + 1];
-    let mut outgoing = vec![Vec::new(); page_count + 1];
+) -> Option<BtreeAdjacency> {
+    let mut incoming = cancelled.index();
+    let mut outgoing: super::index_map::IndexMap<u32, Vec<usize>> = cancelled.index();
     for (index, claim) in claims.iter().enumerate() {
         if cancelled.stopped() {
             return None;
         }
-        outgoing[source_page(&claim.source) as usize].push(index);
+        let source = source_page(&claim.source);
+        let mut indexes = cancelled.read_index(&outgoing, &source).unwrap_or_default();
+        if cancelled.stopped() {
+            return None;
+        }
+        indexes.push(index);
+        outgoing.insert(source, indexes);
         if claim.state == RelationshipState::Validated {
-            incoming[claim.target.as_ref().unwrap().page_number as usize] = true;
+            incoming.insert(claim.target.as_ref().unwrap().page_number, true);
         }
         cancelled.advance(TopologyPhase::BtreeTraversal);
     }
-    Some((incoming, outgoing))
+    Some(BtreeAdjacency { incoming, outgoing })
 }
 
 struct BtreeWalk<'a> {
-    claims: &'a [RelationshipClaim],
-    outgoing: &'a [Vec<usize>],
+    claims: &'a super::index::Sequence<RelationshipClaim>,
+    outgoing: &'a super::index_map::IndexMap<u32, Vec<usize>>,
     max_pages: u32,
     max_total_pages: u64,
     cancelled: &'a WorkControl,
@@ -2092,7 +2311,7 @@ struct BtreeWalk<'a> {
 
 fn walk_btree_children(
     walk: &BtreeWalk<'_>,
-    traversals: &mut Vec<Traversal>,
+    traversals: &mut super::index::Sequence<Traversal>,
     traversal_pages: &mut u64,
     origin: &EntityIdentity,
     prefix: Vec<PageIdentity>,
@@ -2102,8 +2321,17 @@ fn walk_btree_children(
         .last()
         .expect("B-tree prefix is non-empty")
         .page_number;
-    for index in walk.outgoing[page_number as usize].iter().rev() {
-        let claim = &walk.claims[*index];
+    for index in walk
+        .cancelled
+        .read_index(walk.outgoing, &page_number)
+        .unwrap_or_default()
+        .iter()
+        .rev()
+    {
+        let Some(claim) = walk.claims.get(*index) else {
+            return false;
+        };
+        let claim = &claim;
         if walk.cancelled.stopped() {
             traversals.push(stopped_btree_traversal(
                 origin.clone(),
@@ -2152,6 +2380,25 @@ fn walk_btree_children(
             record_aggregate_btree_stop(walk.cancelled, traversals, origin, prefix, claim);
             return false;
         }
+        let queue_growth = if pending.len() == pending.capacity() {
+            (pending.len().max(4) as u64).saturating_mul(128)
+        } else {
+            0
+        };
+        if !walk.cancelled.reserve_memory(
+            (prefix.len() as u64)
+                .saturating_add(1)
+                .saturating_mul(128)
+                .saturating_add(queue_growth),
+        ) {
+            traversals.push(stopped_btree_traversal(
+                origin.clone(),
+                prefix,
+                claim,
+                TraversalStopReason::Budget,
+            ));
+            return false;
+        }
         let mut next_prefix = prefix.clone();
         let target = claim.target.clone().expect("validated target");
         next_prefix.push(target.clone());
@@ -2162,7 +2409,7 @@ fn walk_btree_children(
 
 fn record_aggregate_btree_stop(
     cancelled: &WorkControl,
-    traversals: &mut Vec<Traversal>,
+    traversals: &mut super::index::Sequence<Traversal>,
     origin: &EntityIdentity,
     prefix: Vec<PageIdentity>,
     claim: &RelationshipClaim,
@@ -2233,6 +2480,31 @@ fn compatible_btree_kinds(
             Some(super::BtreeKind::IndexInterior | super::BtreeKind::IndexLeaf)
         )
     )
+}
+
+pub(super) fn index_claim_targets(
+    claims: &super::index::Sequence<RelationshipClaim>,
+    control: &WorkControl,
+    phase: TopologyPhase,
+) -> Option<super::index_map::IndexMap<u32, Vec<usize>>> {
+    let mut incoming: super::index_map::IndexMap<u32, Vec<usize>> = claims.map();
+    for (index, claim) in claims.iter().enumerate() {
+        if control.traversal_reason().is_some() {
+            return None;
+        }
+        control.advance(phase);
+        if let Some(target) = &claim.target {
+            let mut indexes = control
+                .read_index(&incoming, &target.page_number)
+                .unwrap_or_default();
+            if control.stopped() {
+                return None;
+            }
+            indexes.push(index);
+            incoming.insert(target.page_number, indexes);
+        }
+    }
+    Some(incoming)
 }
 
 #[cfg(test)]
