@@ -14,8 +14,10 @@ use serde_json::ser::{CompactFormatter, Formatter};
 use tokio::sync::Semaphore;
 
 /// Hard ceilings for a web projection. Operators may lower them at startup.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WebLimits {
+    pub request_bytes: usize,
     pub response_bytes: usize,
     pub collection_items: usize,
     pub concurrent_requests: usize,
@@ -24,6 +26,7 @@ pub struct WebLimits {
 impl Default for WebLimits {
     fn default() -> Self {
         Self {
+            request_bytes: BODY_BYTES,
             response_bytes: 8 * 1024 * 1024,
             collection_items: 100_000,
             concurrent_requests: 8,
@@ -35,6 +38,7 @@ impl WebLimits {
     pub(super) fn capped(self) -> Self {
         let ceiling = Self::default();
         Self {
+            request_bytes: self.request_bytes.min(BODY_BYTES),
             response_bytes: self.response_bytes.clamp(1024, ceiling.response_bytes),
             collection_items: self.collection_items.clamp(1, ceiling.collection_items),
             concurrent_requests: self
@@ -46,6 +50,7 @@ impl WebLimits {
 
 pub(super) struct Admission {
     pub address: SocketAddr,
+    pub request_bytes: usize,
     pub response_bytes: usize,
     pub requests: Arc<Semaphore>,
 }
@@ -67,7 +72,13 @@ pub(super) async fn protect(
         .upper()
         .is_some_and(|length| length > limit as u64)
     {
-        response = budget(StatusCode::INSUFFICIENT_STORAGE, "response_byte_budget");
+        response = budget_at(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "response_byte_budget",
+            "response_admission",
+            0,
+            response.body().size_hint().exact(),
+        );
     }
     for (name, value) in [
         ("cache-control", "no-store"),
@@ -142,10 +153,21 @@ async fn admit(state: Arc<Admission>, request: Request, next: Next) -> Response 
     tokio::spawn(async move {
         let _permit = permit;
         let (parts, body) = request.into_parts();
+        let body_total = body.size_hint().exact();
         let bytes =
-            match tokio::time::timeout(Duration::from_secs(5), to_bytes(body, BODY_BYTES)).await {
+            match tokio::time::timeout(Duration::from_secs(5), to_bytes(body, state.request_bytes))
+                .await
+            {
                 Ok(Ok(bytes)) => bytes,
-                Ok(Err(_)) => return budget(StatusCode::PAYLOAD_TOO_LARGE, "request_body_budget"),
+                Ok(Err(_)) => {
+                    return budget_at(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "request_body_budget",
+                        "request_admission",
+                        0,
+                        body_total,
+                    );
+                }
                 Err(_) => return budget(StatusCode::REQUEST_TIMEOUT, "request_body_timeout"),
             };
         if parts.method != "POST" && !bytes.is_empty() {
@@ -220,11 +242,31 @@ pub(super) fn error(status: StatusCode, reason: &'static str) -> Response {
 }
 
 pub(super) fn budget(status: StatusCode, reason: &'static str) -> Response {
-    (
+    budget_at(
         status,
-        axum::Json(serde_json::json!({"state": "budget_stopped", "reason": reason})),
+        reason,
+        if reason.starts_with("response_") {
+            "response_admission"
+        } else {
+            "request_admission"
+        },
+        0,
+        None,
     )
-        .into_response()
+}
+
+fn budget_at(
+    status: StatusCode,
+    reason: &'static str,
+    scope: &'static str,
+    evaluated: u64,
+    total: Option<u64>,
+) -> Response {
+    (status, axum::Json(serde_json::json!({
+        "state": "budget_stopped", "reason": reason,
+        "coverage": { "scope": scope, "evaluated": evaluated, "total": total,
+            "remainder": total.map(|n| n.saturating_sub(evaluated)), "stoppingBoundary": reason }
+    }))).into_response()
 }
 
 struct Output {
@@ -303,13 +345,16 @@ pub(super) fn json(value: &impl Serialize, limits: WebLimits) -> Response {
     let mut serializer = serde_json::Serializer::with_formatter(&mut output, formatter);
     let result = value.serialize(&mut serializer);
     if result.is_err() {
-        return budget(
+        return budget_at(
             StatusCode::INSUFFICIENT_STORAGE,
             if output.exceeded {
                 "response_byte_budget"
             } else {
                 "response_collection_budget"
             },
+            "response_serialization",
+            output.bytes.len() as u64,
+            None,
         );
     }
     ([(header::CONTENT_TYPE, "application/json")], output.bytes).into_response()

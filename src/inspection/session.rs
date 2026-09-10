@@ -44,6 +44,8 @@ pub enum CoverageReason {
     InputChanged,
     FatalGeometry,
     AllocationFailure,
+    CellBudget,
+    ResidentMemoryBudget,
 }
 
 /// Coverage is explicitly limited to page inventory; later structural passes have their own scope.
@@ -75,6 +77,13 @@ pub struct Progress {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStatus {
+    pub operational_budget: super::OperationalBudget,
+    pub work_progress: Option<super::WorkProgress>,
+    pub work_coverage: Vec<super::WorkProgress>,
+    pub traversal_budget: super::TraversalBudget,
+    pub schema_budget: super::SchemaBudget,
+    pub sidecar_budget: super::SidecarBudget,
+    pub semantic_budget: Option<crate::semantic::SemanticBudget>,
     pub deep_limits: DeepLimits,
     pub session_id: String,
     pub available_revisions: Vec<u64>,
@@ -341,6 +350,7 @@ impl Inputs {
 }
 
 struct SessionData {
+    processed_cells: u64,
     inputs: Arc<Inputs>,
     status: SessionStatus,
     snapshot: Option<DatabaseSnapshot>,
@@ -415,6 +425,8 @@ impl SessionData {
                 page.classification = classification;
             }
             self.published = Some(Arc::new(InspectionGraph {
+                work_coverage: self.topology_cancellation.receipts(),
+                operational_budget: self.status.operational_budget,
                 semantic_metadata,
                 deep_inspections: vec![],
                 schema,
@@ -446,6 +458,7 @@ impl SessionData {
 pub struct InspectionSession {
     semantic_metadata: Option<crate::semantic::SemanticBudget>,
     deep_limits: DeepLimits,
+    shutting_down: AtomicBool,
     deep_jobs: Mutex<std::collections::BTreeMap<String, Arc<DeepJob>>>,
     data: Mutex<SessionData>,
     active_checks: AtomicUsize,
@@ -521,12 +534,21 @@ impl InspectionSession {
         Ok(Self {
             semantic_metadata: None,
             deep_limits: DeepLimits::default(),
+            shutting_down: AtomicBool::new(false),
             deep_jobs: Mutex::new(std::collections::BTreeMap::new()),
             active_checks: AtomicUsize::new(0),
             cancel_verification: AtomicBool::new(false),
             data: Mutex::new(SessionData {
+                processed_cells: 0,
                 inputs,
                 status: SessionStatus {
+                    operational_budget: super::OperationalBudget::default(),
+                    work_progress: None,
+                    work_coverage: vec![],
+                    traversal_budget,
+                    schema_budget,
+                    sidecar_budget,
+                    semantic_budget: None,
                     deep_limits: DeepLimits::default(),
                     session_id: Uuid::new_v4().to_string(),
                     available_revisions: vec![],
@@ -565,6 +587,30 @@ impl InspectionSession {
         })
     }
 
+    /// Observes structural work at deterministic boundaries outside the session lock.
+    /// Return Cancel or Stop to stop this fast inspection at the observed boundary.
+    #[must_use]
+    pub fn with_work_observer(
+        self,
+        observe: impl FnMut(&super::WorkProgress) -> ScanControl + Send + 'static,
+    ) -> Self {
+        self.lock()
+            .topology_cancellation
+            .set_observer(Box::new(observe));
+        self
+    }
+
+    /// Sets resource ceilings before any inspection work is started.
+    #[must_use]
+    pub fn with_operational_budget(mut self, budget: super::OperationalBudget) -> Self {
+        self.data
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .status
+            .operational_budget = budget;
+        self
+    }
+
     /// Opts into descriptive metadata from a bounded private subprocess of this executable.
     /// Call before scanning; unavailable enrichment never changes physical evidence.
     #[must_use]
@@ -578,7 +624,8 @@ impl InspectionSession {
         mut self,
         budget: crate::semantic::SemanticBudget,
     ) -> Self {
-        self.semantic_metadata = Some(budget);
+        self.semantic_metadata = Some(budget.bounded());
+        self.lock().status.semantic_budget = self.semantic_metadata;
         self
     }
 
@@ -653,6 +700,12 @@ impl InspectionSession {
             }
             d.topology_active = true;
             d.topology_cancellation.reset();
+            d.topology_cancellation
+                .set_phase_limit(d.status.operational_budget.max_phase_units);
+            d.topology_cancellation
+                .set_memory_limit(d.status.operational_budget.max_resident_bytes);
+            d.topology_cancellation
+                .set_freelist_limit(d.status.operational_budget.max_freelist_trunks);
             (
                 Arc::clone(&d.inputs),
                 d.snapshot.clone(),
@@ -688,14 +741,7 @@ impl InspectionSession {
             &cancellation,
             &mut checkpoint,
         );
-        let semantic_metadata = match self.semantic_metadata {
-            Some(budget) if reason == CoverageReason::Complete => {
-                crate::semantic::enrich(&inputs.file, &schema, budget, || {
-                    cancellation.traversal_reason().is_some()
-                })
-            }
-            _ => crate::semantic::SemanticMetadata::unavailable(),
-        };
+        let semantic_metadata = self.inspect_semantic(&inputs, &schema, reason, &cancellation);
         drop(pages);
         let (publish_state, publish_reason, pending_stop) = {
             let mut d = self.lock();
@@ -707,6 +753,7 @@ impl InspectionSession {
             if let Some((pending_state, pending_reason)) = d.pending_topology_stop.take() {
                 (pending_state, pending_reason, true)
             } else if d.status.state == SessionState::Scanning {
+                let state = cancellation.session_state(state);
                 (state, reason, false)
             } else {
                 return Ok(());
@@ -738,6 +785,65 @@ impl InspectionSession {
             semantic_metadata,
         );
         Ok(())
+    }
+
+    fn inspect_semantic(
+        &self,
+        inputs: &Inputs,
+        schema: &super::SchemaEvidence,
+        reason: CoverageReason,
+        cancellation: &super::topology::WorkControl,
+    ) -> crate::semantic::SemanticMetadata {
+        match self.semantic_metadata {
+            Some(budget) if reason == CoverageReason::Complete => {
+                cancellation.begin_phase(super::TopologyPhase::SemanticHelper, None);
+                let mut metadata =
+                    crate::semantic::enrich(&inputs.file, schema, budget, |coverage| {
+                        if coverage.phase == crate::semantic::SemanticPhase::Copy {
+                            cancellation.set_extent(
+                                coverage.evaluated_bytes.div_ceil(16384),
+                                coverage.total_bytes.map(|n| n.div_ceil(16384)),
+                            );
+                        } else {
+                            cancellation.set_extent(cancellation.progress().evaluated, None);
+                        }
+                        cancellation.traversal_reason().is_some()
+                    });
+                if let Some(reason) = cancellation.traversal_reason() {
+                    metadata.coverage.reason = match reason {
+                        super::TraversalStopReason::Budget => {
+                            crate::semantic::SemanticReason::WorkBudget
+                        }
+                        super::TraversalStopReason::OperatorStop => {
+                            crate::semantic::SemanticReason::OperatorStop
+                        }
+                        _ => crate::semantic::SemanticReason::Cancelled,
+                    };
+                } else {
+                    use crate::semantic::SemanticReason;
+                    let limit = match metadata.coverage.reason {
+                        SemanticReason::CopyByteBudget => Some(super::BudgetKind::HelperCopyBytes),
+                        SemanticReason::SchemaRecordBudget => {
+                            Some(super::BudgetKind::HelperRecords)
+                        }
+                        SemanticReason::TimeBudget => Some(super::BudgetKind::HelperTime),
+                        SemanticReason::OutputByteBudget => {
+                            Some(super::BudgetKind::HelperOutputBytes)
+                        }
+                        _ => None,
+                    };
+                    if let Some(limit) = limit {
+                        cancellation.mark_local_budget(limit);
+                    } else if metadata.coverage.reason == SemanticReason::Complete {
+                        cancellation.finish_phase(super::TopologyPhase::SemanticHelper);
+                    } else {
+                        cancellation.mark_unavailable();
+                    }
+                }
+                metadata
+            }
+            _ => crate::semantic::SemanticMetadata::unavailable(),
+        }
     }
 
     fn inspect_schema(
@@ -821,6 +927,10 @@ impl InspectionSession {
         status.available_revisions = data.revisions.keys().copied().collect();
         status.progress.verifying = self.active_checks.load(Ordering::Acquire) > 0;
         status.progress.building_topology = data.topology_active;
+        status.work_coverage = data.topology_cancellation.receipts();
+        status.work_progress = data
+            .topology_active
+            .then(|| data.topology_cancellation.progress());
         status
     }
 
@@ -867,32 +977,73 @@ impl InspectionSession {
             drop(d);
             self.finish(SessionState::Published, CoverageReason::Complete, || {})?;
         } else {
-            if Arc::make_mut(&mut d.pages).try_reserve(1).is_err() {
-                drop(d);
-                return self.finish(
-                    SessionState::Stopped,
-                    CoverageReason::AllocationFailure,
-                    || {},
-                );
-            }
-            let number = d.status.progress.completed + 1;
-            let geometry = &d
-                .snapshot
-                .as_ref()
-                .ok_or(InspectionError::NotScanning)?
-                .geometry;
-            let detail = super::roles::reserved_detail(geometry, number)
-                .unwrap_or_else(|| super::btree::read_page(&d.inputs.file, number, geometry));
-            let classification = super::roles::initial(geometry, number, &detail);
-            Arc::make_mut(&mut d.pages).push(PageEntity {
-                number,
-                classification,
-                detail,
-            });
-            d.status.progress.completed = number;
-            if !d.validate() {
-                return Err(InspectionError::Invalidated);
-            }
+            return self.advance_page(d);
+        }
+        Ok(())
+    }
+
+    fn advance_page(&self, mut d: MutexGuard<'_, SessionData>) -> Result<(), InspectionError> {
+        // Reserve headroom for the largest bounded page interpretation before reading cells.
+        let page_size = d
+            .snapshot
+            .as_ref()
+            .ok_or(InspectionError::NotScanning)?
+            .geometry
+            .page_size;
+        if !super::budget::memory_available(
+            d.status.operational_budget.max_resident_bytes,
+            u64::from(page_size) * 2048,
+        ) {
+            drop(d);
+            return self.finish(
+                SessionState::Stopped,
+                CoverageReason::ResidentMemoryBudget,
+                || {},
+            );
+        }
+        if Arc::make_mut(&mut d.pages).try_reserve(1).is_err() {
+            drop(d);
+            return self.finish(
+                SessionState::Stopped,
+                CoverageReason::AllocationFailure,
+                || {},
+            );
+        }
+        let number = d.status.progress.completed + 1;
+        let geometry = &d
+            .snapshot
+            .as_ref()
+            .ok_or(InspectionError::NotScanning)?
+            .geometry;
+        let remaining = d
+            .status
+            .operational_budget
+            .max_processed_cells
+            .saturating_sub(d.processed_cells);
+        let Ok(detail) = super::roles::reserved_detail(geometry, number).map_or_else(
+            || {
+                super::btree::read_page_with_cell_budget(
+                    &d.inputs.file,
+                    number,
+                    geometry,
+                    remaining,
+                )
+            },
+            Ok,
+        ) else {
+            drop(d);
+            return self.finish(SessionState::Stopped, CoverageReason::CellBudget, || {});
+        };
+        let classification = super::roles::initial(geometry, number, &detail);
+        d.processed_cells += detail.cells.len() as u64;
+        Arc::make_mut(&mut d.pages).push(PageEntity {
+            number,
+            classification,
+            detail,
+        });
+        d.status.progress.completed = number;
+        if !d.validate() {
+            return Err(InspectionError::Invalidated);
         }
         Ok(())
     }

@@ -174,6 +174,8 @@ pub(super) fn inspect(
             evidence.coverage.reason =
                 if reason == crate::inspection::TraversalStopReason::Cancelled {
                     "cancelled"
+                } else if reason == crate::inspection::TraversalStopReason::Budget {
+                    "budget"
                 } else {
                     "operator_stop"
                 };

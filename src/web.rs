@@ -44,6 +44,7 @@ pub fn atlas_router_for_listener(
     let limits = limits.capped();
     let admission = Arc::new(security::Admission {
         address,
+        request_bytes: limits.request_bytes,
         response_bytes: limits.response_bytes,
         requests: Arc::new(tokio::sync::Semaphore::new(limits.concurrent_requests)),
     });
@@ -119,13 +120,27 @@ async fn bootstrap(Path(id): Path<String>, State(state): State<WebState>) -> Res
         .into_response()
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebStatus {
+    #[serde(flatten)]
+    status: crate::inspection::SessionStatus,
+    web_limits: WebLimits,
+}
+
 async fn status(Path(id): Path<String>, State(state): State<WebState>) -> Response {
     let WebState { session, limits } = state;
     let status = session.status();
     if id != status.snapshot_id {
         return StatusCode::NOT_FOUND.into_response();
     }
-    security::json(&status, limits)
+    security::json(
+        &WebStatus {
+            status,
+            web_limits: limits,
+        },
+        limits,
+    )
 }
 
 async fn revision(

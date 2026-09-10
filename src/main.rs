@@ -15,6 +15,38 @@ use volmap_sqlite::web::{WebLimits, atlas_router_for_listener, bounded_listener}
 #[derive(Debug, Parser)]
 #[command(name = "volmap-sqlite", about = "Inspect a frozen SQLite main file")]
 struct Arguments {
+    /// Maximum resident process bytes; inspection stops before allocation boundaries.
+    #[arg(long, default_value_t = 256 * 1024 * 1024)]
+    max_resident_bytes: u64,
+
+    /// Maximum structural cells accepted across the fast page inventory.
+    #[arg(long, default_value_t = 1_000_000)]
+    max_processed_cells: u64,
+
+    /// Maximum trunks followed in the freelist chain.
+    #[arg(long, default_value_t = 32768)]
+    max_freelist_trunks: u32,
+
+    /// Maximum work units evaluated in each structural phase.
+    #[arg(long, default_value_t = 1_000_000)]
+    max_phase_units: u64,
+
+    /// Maximum concurrently admitted deep-inspection workers.
+    #[arg(long, default_value_t = 4)]
+    max_deep_jobs: u32,
+
+    /// Maximum retained deep-inspection jobs and resulting revisions.
+    #[arg(long, default_value_t = 64)]
+    max_retained_jobs: u32,
+
+    /// Maximum UTF-8 bytes in a selected cell's decoded values.
+    #[arg(long, default_value_t = 16 * 1024 * 1024)]
+    max_decoded_bytes: u64,
+
+    /// Maximum web request body bytes (0..=4096).
+    #[arg(long, default_value_t = 4096, value_parser = clap::value_parser!(u32).range(0..=4096))]
+    max_web_request_bytes: u32,
+
     /// Frozen `SQLite` main file to inspect.
     database: PathBuf,
 
@@ -22,15 +54,15 @@ struct Arguments {
     #[arg(long)]
     terminal: bool,
 
-    /// Terminal deep-inspection payload-byte request budget.
+    /// Selected-cell deep-inspection payload-byte request budget.
     #[arg(long, default_value_t = 16 * 1024 * 1024)]
     max_deep_bytes: u64,
 
-    /// Terminal deep-inspection overflow-page request budget.
+    /// Selected-cell deep-inspection overflow-page request budget.
     #[arg(long, default_value_t = 32768)]
     max_deep_overflow_pages: u32,
 
-    /// Terminal deep-inspection decoded-value request budget.
+    /// Selected-cell deep-inspection decoded-value request budget.
     #[arg(long, default_value_t = 4096)]
     max_deep_values: u32,
 
@@ -110,6 +142,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             max_decoded_bytes: arguments.max_schema_bytes,
         },
     )?;
+    let deep_budget = volmap_sqlite::inspection::DeepBudget {
+        max_payload_bytes: arguments.max_deep_bytes,
+        max_overflow_pages: arguments.max_deep_overflow_pages,
+        max_values: arguments.max_deep_values,
+        max_decoded_bytes: arguments.max_decoded_bytes,
+    };
+    let session = session
+        .with_operational_budget(volmap_sqlite::inspection::OperationalBudget {
+            max_processed_cells: arguments.max_processed_cells,
+            max_phase_units: arguments.max_phase_units,
+            max_freelist_trunks: arguments.max_freelist_trunks,
+            max_resident_bytes: arguments.max_resident_bytes,
+        })
+        .with_deep_limits(volmap_sqlite::inspection::DeepLimits {
+            max_jobs: arguments.max_retained_jobs,
+            max_concurrent_jobs: arguments.max_deep_jobs,
+            per_job: deep_budget,
+        });
     let session = Arc::new(if arguments.semantic_metadata {
         session.with_semantic_metadata_budget(volmap_sqlite::semantic::SemanticBudget {
             max_copy_bytes: arguments.max_semantic_bytes,
@@ -121,20 +171,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         session
     });
     if arguments.terminal {
-        volmap_sqlite::terminal::run(
-            session,
-            volmap_sqlite::inspection::DeepBudget {
-                max_payload_bytes: arguments.max_deep_bytes,
-                max_overflow_pages: arguments.max_deep_overflow_pages,
-                max_values: arguments.max_deep_values,
-            },
-        )?;
+        volmap_sqlite::terminal::run(session, deep_budget)?;
         return Ok(());
     }
     serve(
         session,
         arguments.listen,
         WebLimits {
+            request_bytes: arguments.max_web_request_bytes as usize,
             response_bytes: arguments.max_web_response_bytes as usize,
             collection_items: arguments.max_web_collection_items as usize,
             concurrent_requests: arguments.max_web_requests as usize,
@@ -176,13 +220,15 @@ async fn serve(
     let shutdown_session = Arc::clone(&session);
     let server = axum::serve(
         bounded_listener(listener),
-        atlas_router_for_listener(session, address, limits),
+        atlas_router_for_listener(Arc::clone(&session), address, limits),
     )
     .with_graceful_shutdown(async move {
         let _ = tokio::signal::ctrl_c().await;
         let _ = shutdown_session.stop(ScanControl::Cancel);
     })
     .await;
+    session.shutdown();
+    drop(session);
     let _ = worker.await?;
     server?;
     Ok(())

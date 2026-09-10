@@ -102,11 +102,12 @@ impl TerminalFlow {
             |deep| {
                 let status = deep.job.status();
                 format!(
-                    "Deep: {:?} | {} | {} bytes | {} values | cell {}:{}",
+                    "Deep: {:?} | {} | {} bytes | {} values | {} decoded bytes | cell {}:{}",
                     status.state,
                     status.coverage.reason,
                     status.coverage.reconstructed_bytes,
                     status.coverage.decoded_values,
+                    status.coverage.decoded_bytes,
                     deep.target.page_number,
                     deep.target.cell_index
                 )

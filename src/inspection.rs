@@ -6,6 +6,8 @@ use std::path::Path;
 use serde::Serialize;
 use thiserror::Error;
 
+mod budget;
+pub use budget::OperationalBudget;
 mod btree;
 mod deep;
 pub use deep::{
@@ -40,10 +42,10 @@ pub use session::{
     SessionState, SessionStatus,
 };
 pub use topology::{
-    Containment, DiagnosticSeverity, EntityIdentity, PageIdentity, PhysicalEvidence, Relationship,
-    RelationshipClaim, RelationshipKind, RelationshipState, StructuralDiagnostic, TopologyCoverage,
-    TopologyCoverageReason, TopologyPhase, Traversal, TraversalBudget, TraversalKind,
-    TraversalStop, TraversalStopReason,
+    BudgetKind, Containment, DiagnosticSeverity, EntityIdentity, PageIdentity, PhysicalEvidence,
+    Relationship, RelationshipClaim, RelationshipKind, RelationshipState, StructuralDiagnostic,
+    TopologyCoverage, TopologyCoverageReason, TopologyPhase, Traversal, TraversalBudget,
+    TraversalKind, TraversalStop, TraversalStopReason, WorkProgress,
 };
 
 const SQLITE_HEADER_SIZE: usize = 100;
@@ -134,6 +136,8 @@ pub struct PageEntity {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectionGraph {
+    pub work_coverage: Vec<WorkProgress>,
+    pub operational_budget: OperationalBudget,
     pub semantic_metadata: crate::semantic::SemanticMetadata,
     pub deep_inspections: Vec<DeepEvidence>,
     pub schema: SchemaEvidence,

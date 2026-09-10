@@ -207,6 +207,14 @@ impl Inspector<'_> {
         self.result.freelist.coverage.reason = FreelistCoverageReason::Complete;
         let mut index = self.claim(&first, RelationshipKind::FreelistTrunk);
         'trunks: while self.result.claims[index].target.is_some() {
+            if self.prefix.len() as u64 >= self.control.freelist_limit() {
+                self.control
+                    .mark_local_budget(super::BudgetKind::FreelistTrunks);
+                self.result.claims[index].stop_reason = Some(TraversalStopReason::Budget);
+                self.result.freelist.coverage.reason = FreelistCoverageReason::Budget;
+                self.stop_at(index);
+                break;
+            }
             if !self.validate(index, AllocationRole::FreelistTrunk, budget) {
                 self.stop_at(index);
                 break;
@@ -374,6 +382,7 @@ impl Inspector<'_> {
             self.result.claims[index].stop_reason = Some(reason);
             self.result.freelist.coverage.reason = match reason {
                 TraversalStopReason::Cancelled => FreelistCoverageReason::Cancelled,
+                TraversalStopReason::Budget => FreelistCoverageReason::Budget,
                 _ => FreelistCoverageReason::OperatorStop,
             };
             return false;

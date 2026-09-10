@@ -92,6 +92,18 @@ function respond(status: () => SessionStatus) {
 }
 
 describe("page atlas", () => {
+  it("shows effective budgets and partial coverage in both workspaces", async () => {
+    respond(() => ({ ...published, state: "stopped", operationalBudget: {
+      maxProcessedCells: 12, maxPhaseUnits: 34, maxResidentBytes: 67108864,
+    }, coverage: { ...graph.coverage, reason: "cell_budget", evaluated: 1, nextPage: 2, remainder: 2 } }));
+    render(<App />);
+    expect(await screen.findByText("Effective inspection budgets")).toBeTruthy();
+    expect(screen.getByText(/Processed cells: 12/)).toBeTruthy();
+    expect(screen.getByText(/Reason: cell budget/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Schema flow" }));
+    expect(screen.getByText(/Processed cells: 12/)).toBeTruthy();
+  });
+
   it("keeps sidecar consequences visible while selecting main-file pages", async () => {
     const snapshot = structuredClone(graph);
     Object.assign(snapshot, { sidecars: ["wal", "journal", "shm"].map(kind => ({

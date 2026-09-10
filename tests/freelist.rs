@@ -417,3 +417,31 @@ fn independently_supported_storage_links_conflict_with_allocation_claims_on_both
         assert_eq!(graph["freelist"]["coverage"]["reason"], "invalid_structure");
     }
 }
+
+#[test]
+fn trunk_chain_budget_retains_the_prefix_and_does_not_claim_a_count_mismatch() {
+    use volmap_sqlite::inspection::{OperationalBudget, ScanControl};
+    for ceiling in [0, 1, 2] {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("chain.sqlite");
+        fs::write(&path, fixture()).unwrap();
+        let session = InspectionSession::begin(&path)
+            .unwrap()
+            .with_operational_budget(OperationalBudget {
+                max_freelist_trunks: ceiling,
+                ..OperationalBudget::default()
+            });
+        session.scan(|_| ScanControl::Continue).unwrap();
+        let graph = serde_json::to_value(&*session.graph().unwrap()).unwrap();
+        assert_eq!(
+            graph["freelist"]["trunks"].as_array().unwrap().len(),
+            ceiling as usize
+        );
+        assert_eq!(
+            graph["freelist"]["coverage"]["reason"],
+            if ceiling < 2 { "budget" } else { "complete" }
+        );
+        assert!(!graph["diagnostics"].to_string().contains("count_mismatch"));
+        assert_eq!(graph["coverage"]["reason"], "complete");
+    }
+}

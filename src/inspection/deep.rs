@@ -22,6 +22,12 @@ pub struct DeepBudget {
     pub max_payload_bytes: u64,
     pub max_overflow_pages: u32,
     pub max_values: u32,
+    #[serde(default = "default_decoded_bytes")]
+    pub max_decoded_bytes: u64,
+}
+
+fn default_decoded_bytes() -> u64 {
+    16 * 1024 * 1024
 }
 
 impl Default for DeepBudget {
@@ -30,6 +36,7 @@ impl Default for DeepBudget {
             max_payload_bytes: 16 * 1024 * 1024,
             max_overflow_pages: 32_768,
             max_values: 4096,
+            max_decoded_bytes: default_decoded_bytes(),
         }
     }
 }
@@ -56,6 +63,7 @@ pub struct DeepCoverage {
     pub reconstructed_bytes: String,
     pub remainder_bytes: Option<String>,
     pub decoded_values: u32,
+    pub decoded_bytes: String,
     pub expected_values: Option<u32>,
     pub stopping_page: Option<u32>,
     pub stopping_payload_offset: Option<String>,
@@ -72,6 +80,7 @@ impl Default for DeepCoverage {
             reconstructed_bytes: "0".into(),
             remainder_bytes: None,
             decoded_values: 0,
+            decoded_bytes: "0".into(),
             expected_values: None,
             stopping_page: None,
             stopping_payload_offset: None,
@@ -299,6 +308,7 @@ fn decode_record(
     }
     coverage.expected_values = Some(u32::try_from(serials.len()).map_err(|_| invalid(coverage))?);
     let mut values = Vec::new();
+    let mut decoded_bytes = 0_u64;
     for serial in serials {
         set_record_boundary(coverage, cursor);
         if !checkpoint(coverage) {
@@ -319,30 +329,36 @@ fn decode_record(
             .filter(|end| *end <= bytes.len())
             .ok_or_else(|| invalid(coverage))?;
         let raw = &bytes[cursor..end];
-        let value = match serial {
-            0 => TypedValue::Null,
-            8 | 9 => TypedValue::Integer {
-                value: (serial - 8).to_string(),
-            },
-            1..=6 => {
-                let mut signed = [if raw[0] & 128 == 0 { 0 } else { 255 }; 8];
-                signed[8 - raw.len()..].copy_from_slice(raw);
-                TypedValue::Integer {
-                    value: i64::from_be_bytes(signed).to_string(),
-                }
-            }
-            7 => TypedValue::Real {
-                value: f64::from_be_bytes(raw.try_into().map_err(|_| invalid(coverage))?)
-                    .to_string(),
-            },
-            serial if serial % 2 == 0 => TypedValue::Blob {
-                byte_length: length.to_string(),
-            },
-            _ => TypedValue::Text {
-                value: super::schema::decode_text(raw, encoding)
-                    .map_err(|_| fail(DeepState::Failed, "text_encoding_invalid", coverage))?,
-            },
+        let text_length = if serial >= 13 && serial % 2 == 1 {
+            decoded_text_length(raw, encoding)
+                .map_err(|()| fail(DeepState::Failed, "text_encoding_invalid", coverage))?
+        } else {
+            0
         };
+        if text_length > budget.max_decoded_bytes.saturating_sub(decoded_bytes) {
+            return Err(fail(
+                DeepState::BudgetStopped,
+                "decoded_byte_budget",
+                coverage,
+            ));
+        }
+        let value = decode_value(serial, raw, encoding, coverage)?;
+        let value_bytes = match &value {
+            TypedValue::Null => 0,
+            TypedValue::Integer { value }
+            | TypedValue::Real { value }
+            | TypedValue::Text { value } => value.len() as u64,
+            TypedValue::Blob { byte_length } => byte_length.len() as u64,
+        };
+        if value_bytes > budget.max_decoded_bytes.saturating_sub(decoded_bytes) {
+            return Err(fail(
+                DeepState::BudgetStopped,
+                "decoded_byte_budget",
+                coverage,
+            ));
+        }
+        decoded_bytes += value_bytes;
+        coverage.decoded_bytes = decoded_bytes.to_string();
         let field = DeepField {
             ordinal: coverage.decoded_values,
             serial_type: serial.to_string(),
@@ -360,6 +376,62 @@ fn decode_record(
         return Err(invalid(coverage));
     }
     Ok(values)
+}
+
+fn decode_value(
+    serial: u64,
+    raw: &[u8],
+    encoding: TextEncoding,
+    coverage: &DeepCoverage,
+) -> Result<TypedValue, Failure> {
+    let invalid = |coverage: &DeepCoverage| fail(DeepState::Failed, "record_invalid", coverage);
+    let length = raw.len();
+    Ok(match serial {
+        0 => TypedValue::Null,
+        8 | 9 => TypedValue::Integer {
+            value: (serial - 8).to_string(),
+        },
+        1..=6 => {
+            let mut signed = [if raw[0] & 128 == 0 { 0 } else { 255 }; 8];
+            signed[8 - raw.len()..].copy_from_slice(raw);
+            TypedValue::Integer {
+                value: i64::from_be_bytes(signed).to_string(),
+            }
+        }
+        7 => TypedValue::Real {
+            value: f64::from_be_bytes(raw.try_into().map_err(|_| invalid(coverage))?).to_string(),
+        },
+        serial if serial % 2 == 0 => TypedValue::Blob {
+            byte_length: length.to_string(),
+        },
+        _ => TypedValue::Text {
+            value: super::schema::decode_text(raw, encoding)
+                .map_err(|_| fail(DeepState::Failed, "text_encoding_invalid", coverage))?,
+        },
+    })
+}
+
+// Count UTF-8 output before allocating a decoded string, including UTF-16 expansion.
+fn decoded_text_length(raw: &[u8], encoding: TextEncoding) -> Result<u64, ()> {
+    if encoding == TextEncoding::Utf8 {
+        return std::str::from_utf8(raw)
+            .map(|s| s.len() as u64)
+            .map_err(|_| ());
+    }
+    if !raw.len().is_multiple_of(2) {
+        return Err(());
+    }
+    let units = raw.chunks_exact(2).map(|pair| {
+        let pair = [pair[0], pair[1]];
+        if encoding == TextEncoding::Utf16Le {
+            u16::from_le_bytes(pair)
+        } else {
+            u16::from_be_bytes(pair)
+        }
+    });
+    char::decode_utf16(units).try_fold(0, |n, ch| {
+        ch.map(|ch| n + ch.len_utf8() as u64).map_err(|_| ())
+    })
 }
 
 fn field_source(

@@ -462,3 +462,180 @@ fn cancellation_at_publication_preserves_the_previous_revision() {
     assert_eq!(job.wait().state, DeepState::Cancelled);
     assert_eq!(session.status().revision, Some(1));
 }
+
+#[test]
+fn decoded_byte_budget_stops_at_the_next_value_without_publishing_or_disclosing() {
+    for ceiling in [0, 3, 7] {
+        let (_dir, _path, session) =
+            fixture("CREATE TABLE t(a,b); INSERT INTO t VALUES('abc','DEFG');");
+        let original = session.revision(1).unwrap();
+        let selector = target(&session, 1, 0);
+        let job = session.request_deep(
+            selector.clone(),
+            DeepBudget {
+                max_decoded_bytes: ceiling,
+                ..DeepBudget::default()
+            },
+        );
+        let status = job.wait();
+        let json = serde_json::to_value(&status).unwrap();
+        if ceiling < 7 {
+            assert_eq!(status.state, DeepState::BudgetStopped);
+            assert_eq!(status.coverage.reason, "decoded_byte_budget");
+            assert_eq!(status.coverage.decoded_values, u32::from(ceiling != 0));
+            assert_eq!(json["coverage"]["decodedBytes"], ceiling.to_string());
+            assert_eq!(session.status().revision, Some(1));
+            assert!(session.deep_result(&job.id, &selector).is_err());
+            assert!(!serde_json::to_string(&status).unwrap().contains("DEFG"));
+        } else {
+            assert_eq!(status.state, DeepState::Completed);
+            assert_eq!(json["coverage"]["decodedBytes"], "7");
+        }
+        assert_eq!(original.revision, 1);
+        assert!(original.deep_inspections.is_empty());
+    }
+}
+
+#[test]
+fn waiting_for_cancelled_work_joins_and_drops_its_worker_resources() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use volmap_sqlite::inspection::ScanControl;
+    struct Resource(Arc<AtomicBool>);
+    impl Drop for Resource {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let (_dir, _path, session) = fixture("CREATE TABLE t(value); INSERT INTO t VALUES('SECRET');");
+    let dropped = Arc::new(AtomicBool::new(false));
+    let resource = Resource(Arc::clone(&dropped));
+    let job =
+        session.request_deep_observed(target(&session, 1, 0), DeepBudget::default(), move |_| {
+            let _keep_alive = &resource;
+            ScanControl::Cancel
+        });
+    assert_eq!(job.wait().state, DeepState::Cancelled);
+    assert!(
+        dropped.load(Ordering::Acquire),
+        "wait must include worker cleanup"
+    );
+    assert_eq!(session.status().revision, Some(1));
+}
+
+#[test]
+fn shutdown_cancels_and_joins_jobs_and_closes_admission() {
+    let (_dir, _path, session) = fixture("CREATE TABLE t(value); INSERT INTO t VALUES('SECRET');");
+    let selector = target(&session, 1, 0);
+    session.shutdown();
+    let job = session.request_deep(selector, DeepBudget::default());
+    assert_eq!(job.wait().state, DeepState::Cancelled);
+    assert_eq!(job.status().coverage.reason, "session_shutdown");
+    assert_eq!(session.status().revision, Some(1));
+}
+
+#[test]
+fn admission_budget_receipts_include_the_known_selected_payload_boundary() {
+    use volmap_sqlite::inspection::DeepLimits;
+    let (dir, path, old) = fixture("CREATE TABLE t(value); INSERT INTO t VALUES('SECRET');");
+    drop(old);
+    let session = Arc::new(
+        InspectionSession::open(&path)
+            .unwrap()
+            .with_deep_limits(DeepLimits {
+                max_jobs: 0,
+                ..DeepLimits::default()
+            }),
+    );
+    let selector = target(&session, 1, 0);
+    let job = session.request_deep(selector, DeepBudget::default());
+    let status = job.wait();
+    assert_eq!(status.state, DeepState::BudgetStopped);
+    assert_eq!(status.coverage.payload_bytes.as_deref(), Some("8"));
+    assert_eq!(status.coverage.remainder_bytes.as_deref(), Some("8"));
+    assert_eq!(status.coverage.stopping_page, Some(2));
+    assert_eq!(
+        status.coverage.stopping_payload_offset.as_deref(),
+        Some("0")
+    );
+    drop(dir);
+}
+
+#[test]
+fn cancellation_during_payload_and_decoding_preserves_the_base_revision() {
+    use volmap_sqlite::inspection::ScanControl;
+    for phase in ["payload", "record"] {
+        for boundary in [0, 1] {
+            let (_dir, _path, session) = fixture(
+                "CREATE TABLE t(a,b,c); INSERT INTO t VALUES(printf('%02000d', 1), 'SECOND', 'THIRD');",
+            );
+            let selector = target(&session, 1, 0);
+            let job = session.request_deep_observed(
+                selector.clone(),
+                DeepBudget::default(),
+                move |status| {
+                    let c = &status.coverage;
+                    let reached = if phase == "payload" {
+                        c.overflow_pages.len() == boundary && c.reconstructed_bytes != "0"
+                    } else {
+                        c.expected_values.is_some() && c.decoded_values as usize == boundary
+                    };
+                    if c.phase == phase && reached {
+                        ScanControl::Cancel
+                    } else {
+                        ScanControl::Continue
+                    }
+                },
+            );
+            let status = job.wait();
+            assert_eq!(status.state, DeepState::Cancelled, "{phase} at {boundary}");
+            assert_eq!(status.coverage.phase, phase);
+            assert!(status.coverage.stopping_page.is_some());
+            assert!(status.coverage.remainder_bytes.is_some());
+            assert_eq!(session.status().revision, Some(1));
+            assert!(session.deep_result(&job.id, &selector).is_err());
+            assert!(!serde_json::to_string(&status).unwrap().contains("SECOND"));
+        }
+    }
+}
+
+#[test]
+fn shutdown_cancels_an_active_worker_and_waits_for_its_resources() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    };
+    use std::time::{Duration, Instant};
+    use volmap_sqlite::inspection::{DeepJob, ScanControl};
+    struct CapturedResource(Arc<AtomicBool>);
+    impl Drop for CapturedResource {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let (_dir, _path, session) = fixture("CREATE TABLE t(value); INSERT INTO t VALUES('SECRET');");
+    let (send_job, receive_job) = mpsc::channel::<Arc<DeepJob>>();
+    let (entered, ready) = mpsc::channel();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let resource = CapturedResource(Arc::clone(&dropped));
+    let job =
+        session.request_deep_observed(target(&session, 1, 0), DeepBudget::default(), move |_| {
+            let _keep_alive = &resource;
+            let job = receive_job.recv_timeout(Duration::from_secs(5)).unwrap();
+            entered.send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !job.cancellation_requested() {
+                assert!(
+                    Instant::now() < deadline,
+                    "shutdown did not request cancellation"
+                );
+                std::thread::yield_now();
+            }
+            ScanControl::Continue
+        });
+    send_job.send(Arc::clone(&job)).unwrap();
+    ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    session.shutdown();
+    assert!(dropped.load(Ordering::Acquire));
+    assert_eq!(job.wait().state, DeepState::Cancelled);
+    assert_eq!(session.status().revision, Some(1));
+}

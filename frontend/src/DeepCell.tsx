@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import type { PhysicalEvidence } from "./PageDetail";
 
 interface Target { sessionId: string; snapshotId: string; revision: number; pageNumber: number; cellIndex: number }
-interface Budget { maxPayloadBytes: number; maxOverflowPages: number; maxValues: number }
+export interface Budget { maxPayloadBytes: number; maxOverflowPages: number; maxValues: number; maxDecodedBytes: number }
 interface Coverage {
   phase: string; reason: string; payloadBytes: string | null; reconstructedBytes: string;
-  remainderBytes: string | null; decodedValues: number; expectedValues: number | null;
+  remainderBytes: string | null; decodedValues: number; decodedBytes?: string; expectedValues: number | null;
   stoppingPage: number | null; stoppingPayloadOffset: string | null;
   evidence: PhysicalEvidence[]; overflowPages: { pageNumber: number }[];
 }
@@ -18,14 +18,14 @@ export interface DeepEvidence { cell: { pageNumber: number; index: number }; fie
 type Value = { type: "null" } | { type: "blob"; byteLength: string } | { type: "text" | "integer" | "real"; value: string };
 interface Result { target: Target; revision: number; evidence: DeepEvidence; values: { field: Field; value: Value }[] }
 
-const defaults: Budget = { maxPayloadBytes: 16777216, maxOverflowPages: 32768, maxValues: 4096 };
-const limitLabels: Record<keyof Budget, string> = { maxPayloadBytes: "Payload byte limit", maxOverflowPages: "Overflow page limit", maxValues: "Value count limit" };
+const defaults: Budget = { maxPayloadBytes: 16777216, maxOverflowPages: 32768, maxValues: 4096, maxDecodedBytes: 16777216 };
+const limitLabels: Record<keyof Budget, string> = { maxPayloadBytes: "Payload byte limit", maxOverflowPages: "Overflow page limit", maxValues: "Value count limit", maxDecodedBytes: "Decoded byte limit" };
 function sameTarget(a: Target, b: Target) {
   return a.sessionId === b.sessionId && a.snapshotId === b.snapshotId && a.revision === b.revision && a.pageNumber === b.pageNumber && a.cellIndex === b.cellIndex;
 }
 
-export function DeepCell({ target, currentRevision, onPublished }: { target: Target; currentRevision: number | null; onPublished: (revision: number) => void }) {
-  const [budget, setBudget] = useState(defaults);
+export function DeepCell({ target, currentRevision, onPublished, limits }: { limits?: Budget; target: Target; currentRevision: number | null; onPublished: (revision: number) => void }) {
+  const [budget, setBudget] = useState(limits ?? defaults);
   const [request, setRequest] = useState<{ target: Target; budget: Budget } | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [result, setResult] = useState<Result | null>(null);
@@ -62,13 +62,13 @@ export function DeepCell({ target, currentRevision, onPublished }: { target: Tar
     return () => { abort.abort(); clearTimeout(timer); };
   }, [request, base, onPublished]);
   const pending = request !== null && (job === null || job.state === "pending") && error === null;
-  const validBudget = Object.entries(budget).every(([key, value]) => Number.isSafeInteger(value) && value >= 0 && (key === "maxPayloadBytes" || value <= 4294967295));
+  const validBudget = Object.entries(budget).every(([key, value]) => Number.isSafeInteger(value) && value >= 0 && (!limits || value <= limits[key as keyof Budget]) && (key === "maxPayloadBytes" || key === "maxDecodedBytes" || value <= 4294967295));
   const visible = result?.revision === target.revision && result.target.pageNumber === target.pageNumber && result.target.cellIndex === target.cellIndex;
   return <section className="deep-cell" aria-label="Selected-cell deep inspection">
     <h2>Deep inspection · cell:{target.pageNumber}:{target.cellIndex}</h2>
     <p>Decode this cell's stored values. BLOBs show their type and length. A successful inspection publishes a new immutable revision.</p>
     <details><summary>Deep inspection limits</summary>{(Object.keys(budget) as (keyof Budget)[]).map(key => <label key={key}>
-      {limitLabels[key]} <input type="number" min="0" step="1" value={budget[key]} disabled={pending}
+      {limitLabels[key]} <input type="number" min="0" step="1" value={budget[key]} max={limits?.[key]} disabled={pending}
         onChange={event => setBudget(previous => ({ ...previous, [key]: Number(event.target.value) }))} />
     </label>)}</details>
     {target.revision !== currentRevision && <p>Viewing a historical revision. Choose the latest revision before starting new work.</p>}
@@ -84,6 +84,7 @@ export function DeepCell({ target, currentRevision, onPublished }: { target: Tar
     {(job || pending) && <p role="status">Deep inspection: {job?.state.replaceAll("_", " ") ?? "pending"}</p>}
     {job && <div className="deep-coverage">
       <p>{job.coverage.phase} · {job.coverage.reason.replaceAll("_", " ")} · Reconstructed {job.coverage.reconstructedBytes} / {job.coverage.payloadBytes ?? "unknown"} bytes · Remaining {job.coverage.remainderBytes ?? "unknown"}</p>
+      <p>Decoded bytes: {job.coverage.decodedBytes ?? "unknown"}</p>
       <p>Decoded fields: {job.coverage.decodedValues} / {job.coverage.expectedValues ?? "unknown"}</p>
       {job.coverage.stoppingPayloadOffset !== null && <p>Stopped at payload offset {job.coverage.stoppingPayloadOffset}, page {job.coverage.stoppingPage ?? "unknown"}.</p>}
       <p>Overflow prefix: {job.coverage.overflowPages.map(page => page.pageNumber).join(" → ") || "none"}</p>

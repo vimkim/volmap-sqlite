@@ -119,6 +119,8 @@ where
 #[serde(rename_all = "snake_case")]
 pub enum TopologyCoverageReason {
     Complete,
+    Pending,
+    Unavailable,
     Budget,
     Cancelled,
     OperatorStop,
@@ -144,16 +146,70 @@ pub enum TopologyPhase {
     PointerMapValidation,
     PointerMapReconciliation,
     Complete,
+    SchemaInspection,
+    SemanticHelper,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum BudgetKind {
+    PhaseUnits = 1,
+    ResidentMemory,
+    TraversalPages,
+    FreelistTrunks,
+    SchemaDecodedBytes,
+    HelperCopyBytes,
+    HelperRecords,
+    HelperTime,
+    HelperOutputBytes,
+}
+
+fn budget_kind(value: u8) -> Option<BudgetKind> {
+    match value {
+        1 => Some(BudgetKind::PhaseUnits),
+        2 => Some(BudgetKind::ResidentMemory),
+        3 => Some(BudgetKind::TraversalPages),
+        4 => Some(BudgetKind::FreelistTrunks),
+        5 => Some(BudgetKind::SchemaDecodedBytes),
+        6 => Some(BudgetKind::HelperCopyBytes),
+        7 => Some(BudgetKind::HelperRecords),
+        8 => Some(BudgetKind::HelperTime),
+        9 => Some(BudgetKind::HelperOutputBytes),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkProgress {
+    pub phase: TopologyPhase,
+    pub evaluated: u64,
+    pub total: Option<u64>,
+    pub next: Option<u64>,
+    pub remainder: Option<u64>,
+    pub reason: TopologyCoverageReason,
+    pub limit: Option<BudgetKind>,
+}
+
+type WorkObserver = Box<dyn FnMut(&WorkProgress) -> super::ScanControl + Send>;
 
 pub(super) struct WorkControl {
     stop: AtomicU8,
+    observer: std::sync::Mutex<Option<WorkObserver>>,
+    history: std::sync::Mutex<Vec<WorkProgress>>,
+    started: AtomicU8,
+    limit_kind: AtomicU8,
+    max_phase_units: AtomicU64,
+    max_resident_bytes: AtomicU64,
+    max_freelist_trunks: AtomicU64,
     phase: AtomicU8,
     evaluated: AtomicU64,
     total: AtomicU64,
     total_known: AtomicU8,
     phase_complete: AtomicU8,
     budget_exhausted: AtomicU8,
+    phase_budget_exhausted: AtomicU8,
     aggregate_budget_exhausted: AtomicU8,
 }
 
@@ -161,17 +217,164 @@ impl WorkControl {
     pub(super) fn new() -> Self {
         Self {
             stop: AtomicU8::new(0),
+            observer: std::sync::Mutex::new(None),
+            history: std::sync::Mutex::new(Vec::new()),
+            started: AtomicU8::new(0),
+            limit_kind: AtomicU8::new(0),
+            max_phase_units: AtomicU64::new(u64::MAX),
+            max_resident_bytes: AtomicU64::new(u64::MAX),
+            max_freelist_trunks: AtomicU64::new(u64::MAX),
             phase: AtomicU8::new(TopologyPhase::BtreeClaimCollection as u8),
             evaluated: AtomicU64::new(0),
             total: AtomicU64::new(0),
             total_known: AtomicU8::new(0),
             phase_complete: AtomicU8::new(0),
             budget_exhausted: AtomicU8::new(0),
+            phase_budget_exhausted: AtomicU8::new(0),
             aggregate_budget_exhausted: AtomicU8::new(0),
         }
     }
 
+    pub(super) fn set_freelist_limit(&self, limit: u32) {
+        self.max_freelist_trunks
+            .store(u64::from(limit), Ordering::Release);
+    }
+    pub(super) fn freelist_limit(&self) -> u64 {
+        self.max_freelist_trunks.load(Ordering::Acquire)
+    }
+
+    pub(super) fn set_phase_limit(&self, limit: u64) {
+        self.max_phase_units.store(limit, Ordering::Release);
+    }
+
+    pub(super) fn reserve_memory(&self, bytes: u64) -> bool {
+        let ceiling = self.max_resident_bytes.load(Ordering::Acquire);
+        if ceiling == u64::MAX || super::budget::memory_available(ceiling, bytes) {
+            return true;
+        }
+        if self
+            .stop
+            .compare_exchange(0, 3, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.limit_kind.store(2, Ordering::Release);
+        }
+        false
+    }
+
+    pub(super) fn set_memory_limit(&self, limit: u64) {
+        self.max_resident_bytes.store(limit, Ordering::Release);
+    }
+
+    pub(super) fn set_observer(&self, observer: WorkObserver) {
+        *self
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+    }
+
+    pub(super) fn set_extent(&self, evaluated: u64, total: Option<u64>) {
+        if self.stop_reason().is_none() {
+            self.evaluated.store(evaluated, Ordering::Release);
+            self.total.store(total.unwrap_or(0), Ordering::Release);
+            self.total_known
+                .store(u8::from(total.is_some()), Ordering::Release);
+        }
+    }
+
+    pub(super) fn progress(&self) -> WorkProgress {
+        let evaluated = self.evaluated.load(Ordering::Acquire);
+        let total = (self.total_known.load(Ordering::Acquire) != 0)
+            .then(|| self.total.load(Ordering::Acquire));
+        let complete = self.phase_complete.load(Ordering::Acquire) == 1;
+        WorkProgress {
+            phase: decode_phase(self.phase.load(Ordering::Acquire)),
+            evaluated,
+            total,
+            next: (!complete && total.is_none_or(|n| evaluated < n)).then_some(evaluated + 1),
+            remainder: total.map(|n| n.saturating_sub(evaluated)),
+            reason: self.stop_reason().unwrap_or_else(|| {
+                if self.phase_budget_exhausted.load(Ordering::Acquire) != 0 {
+                    TopologyCoverageReason::Budget
+                } else if self.phase_complete.load(Ordering::Acquire) == 2 {
+                    TopologyCoverageReason::Unavailable
+                } else if complete {
+                    TopologyCoverageReason::Complete
+                } else {
+                    TopologyCoverageReason::Pending
+                }
+            }),
+            limit: budget_kind(self.limit_kind.load(Ordering::Acquire)),
+        }
+    }
+
+    pub(super) fn session_state(&self, fallback: super::SessionState) -> super::SessionState {
+        match self.progress().reason {
+            TopologyCoverageReason::Cancelled => super::SessionState::Cancelled,
+            TopologyCoverageReason::OperatorStop | TopologyCoverageReason::Budget => {
+                super::SessionState::Stopped
+            }
+            _ => fallback,
+        }
+    }
+
+    pub(super) fn receipts(&self) -> Vec<WorkProgress> {
+        let mut receipts = self
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if self.started.load(Ordering::Acquire) != 0 {
+            receipts.push(self.progress());
+        }
+        receipts
+    }
+
+    fn check_budget(&self) {
+        if self.stop_reason().is_some() {
+            return;
+        }
+        if let Some(observer) = self
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            match observer(&self.progress()) {
+                super::ScanControl::Continue => {}
+                super::ScanControl::Cancel => self.cancel(),
+                super::ScanControl::Stop => self.stop(),
+            }
+        }
+        let memory_limit = self.max_resident_bytes.load(Ordering::Acquire);
+        let limit_kind = if memory_limit != u64::MAX
+            && !super::budget::memory_available(memory_limit, 128 * 1024)
+        {
+            2
+        } else if self.phase_complete.load(Ordering::Acquire) == 0
+            && self.evaluated.load(Ordering::Acquire)
+                >= self.max_phase_units.load(Ordering::Acquire)
+        {
+            1
+        } else {
+            return;
+        };
+        if self
+            .stop
+            .compare_exchange(0, 3, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.limit_kind.store(limit_kind, Ordering::Release);
+        }
+    }
+
     pub(super) fn reset(&self) {
+        self.history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.started.store(0, Ordering::Release);
+        self.limit_kind.store(0, Ordering::Release);
         self.stop.store(0, Ordering::Release);
         self.phase
             .store(TopologyPhase::BtreeClaimCollection as u8, Ordering::Release);
@@ -180,6 +383,7 @@ impl WorkControl {
         self.total_known.store(0, Ordering::Release);
         self.phase_complete.store(0, Ordering::Release);
         self.budget_exhausted.store(0, Ordering::Release);
+        self.phase_budget_exhausted.store(0, Ordering::Release);
         self.aggregate_budget_exhausted.store(0, Ordering::Release);
     }
 
@@ -195,12 +399,15 @@ impl WorkControl {
         match self.stop.load(Ordering::Acquire) {
             1 => Some(TopologyCoverageReason::Cancelled),
             2 => Some(TopologyCoverageReason::OperatorStop),
+            3 => Some(TopologyCoverageReason::Budget),
             _ => None,
         }
     }
 
     pub(super) fn traversal_reason(&self) -> Option<TraversalStopReason> {
+        self.check_budget();
         match self.stop_reason() {
+            Some(TopologyCoverageReason::Budget) => Some(TraversalStopReason::Budget),
             Some(TopologyCoverageReason::Cancelled) => Some(TraversalStopReason::Cancelled),
             Some(TopologyCoverageReason::OperatorStop) => Some(TraversalStopReason::OperatorStop),
             _ => None,
@@ -208,11 +415,18 @@ impl WorkControl {
     }
 
     fn stopped(&self) -> bool {
+        self.check_budget();
         self.stop_reason().is_some()
     }
 
-    fn mark_budget_exhausted(&self) {
+    pub(super) fn mark_budget_exhausted(&self) {
+        self.mark_local_budget(BudgetKind::TraversalPages);
+    }
+
+    pub(super) fn mark_local_budget(&self, kind: BudgetKind) {
         self.budget_exhausted.store(1, Ordering::Release);
+        self.phase_budget_exhausted.store(1, Ordering::Release);
+        self.limit_kind.store(kind as u8, Ordering::Release);
     }
 
     pub(super) fn mark_aggregate_budget_exhausted(&self) {
@@ -225,9 +439,18 @@ impl WorkControl {
     }
 
     pub(super) fn begin_phase(&self, phase: TopologyPhase, total: Option<u64>) {
-        if self.stopped() {
+        if self.stop_reason().is_some() {
             return;
         }
+        if self.started.swap(1, Ordering::AcqRel) != 0 {
+            self.finish_phase(decode_phase(self.phase.load(Ordering::Acquire)));
+            self.history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(self.progress());
+        }
+        self.phase_budget_exhausted.store(0, Ordering::Release);
+        self.limit_kind.store(0, Ordering::Release);
         self.phase.store(phase as u8, Ordering::Release);
         self.evaluated.store(0, Ordering::Release);
         self.total.store(total.unwrap_or(0), Ordering::Release);
@@ -242,8 +465,21 @@ impl WorkControl {
         }
     }
 
+    pub(super) fn mark_unavailable(&self) {
+        if self.stop_reason().is_none() {
+            self.phase_complete.store(2, Ordering::Release);
+        }
+    }
+
     pub(super) fn finish_phase(&self, phase: TopologyPhase) {
-        if self.phase.load(Ordering::Acquire) == phase as u8 {
+        if self.phase.load(Ordering::Acquire) == phase as u8
+            && self.stop_reason().is_none()
+            && self.phase_budget_exhausted.load(Ordering::Acquire) == 0
+            && self.phase_complete.load(Ordering::Acquire) != 2
+        {
+            self.total
+                .store(self.evaluated.load(Ordering::Acquire), Ordering::Release);
+            self.total_known.store(1, Ordering::Release);
             self.phase_complete.store(1, Ordering::Release);
         }
     }
@@ -300,6 +536,8 @@ fn decode_phase(value: u8) -> TopologyPhase {
         13 => TopologyPhase::RoleReconciliation,
         14 => TopologyPhase::PointerMapValidation,
         15 => TopologyPhase::PointerMapReconciliation,
+        17 => TopologyPhase::SchemaInspection,
+        18 => TopologyPhase::SemanticHelper,
         _ => TopologyPhase::Complete,
     }
 }
@@ -327,7 +565,9 @@ fn next_phase(phase: TopologyPhase) -> Option<TopologyPhase> {
         TopologyPhase::PointerMapReconciliation => Some(TopologyPhase::RoleReconciliation),
         TopologyPhase::RoleReconciliation => Some(TopologyPhase::Complete),
         TopologyPhase::FreelistInspection => Some(TopologyPhase::BtreeClaimCollection),
-        TopologyPhase::Complete => None,
+        TopologyPhase::Complete
+        | TopologyPhase::SchemaInspection
+        | TopologyPhase::SemanticHelper => None,
     }
 }
 
@@ -562,6 +802,22 @@ struct OverflowSource<'a> {
     cancelled: &'a WorkControl,
 }
 
+fn topology_reservation(pages: &[PageEntity], budget: TraversalBudget) -> u64 {
+    // Reserve headroom for page indexes, cell claims and bounded path copies before allocating them.
+    pages
+        .iter()
+        .fold(0_u64, |n, page| {
+            n.saturating_add(8192)
+                .saturating_add((page.detail.cells.len() as u64).saturating_mul(2048))
+        })
+        .saturating_add(
+            budget
+                .max_total_pages()
+                .min((pages.len() as u64).saturating_mul(pages.len() as u64))
+                .saturating_mul(32),
+        )
+}
+
 pub(super) fn inspect(
     file: &File,
     geometry: &DatabaseGeometry,
@@ -569,6 +825,12 @@ pub(super) fn inspect(
     budget: TraversalBudget,
     cancelled: &WorkControl,
 ) -> Topology {
+    let reservation = topology_reservation(pages, budget);
+    if !cancelled.reserve_memory(reservation) {
+        let mut result = Topology::empty(budget);
+        result.coverage = cancelled.coverage(budget);
+        return result;
+    }
     let mut allocation = super::freelist::inspect(file, geometry, pages, budget, cancelled);
     if cancelled.stopped() || cancelled.aggregate_budget_exhausted() {
         allocation.coverage = cancelled.coverage(budget);

@@ -47,9 +47,11 @@ pub fn run(
     let worker = std::thread::Builder::new()
         .name("terminal-inspection".into())
         .spawn(move || worker_session.scan(|_| ScanControl::Continue))?;
-    let mut flow = TerminalFlow::new(session).with_deep_budget(budget);
+    let mut flow = TerminalFlow::new(Arc::clone(&session)).with_deep_budget(budget);
     let result = event_loop(&mut flow);
     flow.cancel_work();
+    session.shutdown();
+    drop(session);
     drop(guard);
     let _ = worker.join();
     result

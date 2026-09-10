@@ -336,3 +336,74 @@ startup/log privacy. It requires Python 3 and Linux `strace`; syscall tracing as
 that the server makes no outbound connections. Set `VOLMAP_TEST_CHROMIUM` to a
 Chromium headless-shell executable to additionally boot the embedded UI under CSP
 and check its network log for requests outside the selected origin.
+
+## Operational budgets and cancellation
+
+The same session controls fast work, deep work, the browser workspaces and the
+terminal. Startup exposes these additional ceilings:
+
+| Option | Default | Validation boundary |
+| --- | ---: | --- |
+| `--max-resident-bytes` | 268435456 | Before page, topology, schema-payload and revision allocations; structural checkpoints and deep admission |
+| `--max-processed-cells` | 1000000 | Before accepting a page's structural cells |
+| `--max-phase-units` | 1000000 | Work units in each named structural phase |
+| `--max-freelist-trunks` | 32768 | Before following the next freelist trunk |
+| `--max-decoded-bytes` | 16777216 | Before constructing the next selected typed value |
+| `--max-deep-jobs` | 4 | Concurrent deep-job admission |
+| `--max-retained-jobs` | 64 | Retained deep receipts and revisions |
+| `--max-web-request-bytes` | 4096 | Before parsing an HTTP body |
+
+Existing B-tree depth, overflow-chain, aggregate traversal, schema-decoding, WAL-frame,
+helper, payload, value-count, HTTP-concurrency and response-size options still apply.
+`--max-deep-bytes`, `--max-deep-overflow-pages`, `--max-deep-values`, and
+`--max-decoded-bytes` set session-wide ceilings in both adapters. A browser may request
+less for a selected cell. HTTP bodies cannot exceed the fixed 4096-byte security
+ceiling; response and concurrency settings retain their existing hard caps.
+
+A page is an inventory validation boundary. If accepting all of its cells would
+exceed the cell ceiling, that page remains unevaluated; earlier pages remain
+navigable. The receipt identifies the next page and remaining page count. It does
+not invent a total cell count for unread pages. `workCoverage` separately records
+named phases, evaluated units, trusted totals where available, next boundaries,
+remainders, and stop reasons. A pending phase is never described as complete.
+Traversal-specific receipts retain their exact unfollowed link. Schema/helper work
+can stop while complete physical topology remains available. Helper coverage
+separately describes copy/output bytes and resource-stop reasons.
+
+Decoded-byte accounting counts UTF-8 bytes in returned value strings, including
+numeric strings and BLOB length descriptions. NULL costs zero bytes. UTF-16 text
+is sized before allocating its UTF-8 representation. A stopped deep job returns
+structural coverage and withholds all values; it publishes no new revision.
+Existing immutable revisions remain intact.
+
+Resident-memory admission uses Linux `/proc/self/status` and conservative allocation
+headroom. It includes process/runtime residency and retained revisions; concurrent
+deep admissions reserve headroom together. It fails closed if residency cannot be
+measured. This is a cooperative ceiling at validation boundaries, not an OS memory
+sandbox: runtime/allocator overhead can change between observations. Operators
+requiring a hard process/container cap should also apply their normal OS limit.
+The inspector may stop early to preserve allocation headroom rather than exhaust
+available memory. This ticket does not add the spill storage planned in ticket 14.
+
+The browser's **Effective inspection budgets** and **Inspection work coverage**
+sections are shared by page atlas and schema flow. Terminal database/help evidence
+shows the same limits and receipts; PgUp/PgDn and horizontal scrolling expose long
+entries. Browser cancellation and terminal `c` request cancellation; terminal `s`
+records an operator stop. `InspectionSession::with_work_observer` can choose a
+structural phase and evaluated extent deterministically. Observers run outside the
+session lock. `DeepJob::wait` joins its worker, and adapter shutdown closes admission,
+cancels jobs and joins them before returning.
+
+Reproduce the small default-budget probe with:
+
+```sh
+cargo run --example budget_probe -- 2000
+cargo run --example budget_probe -- 20000
+```
+
+On the development Linux host, the debug build inspected 2,000 indexed rows
+(26 pages / 4,012 structural cells) in 102 ms with 7,040 KiB peak RSS, and 20,000 rows
+(235 pages / 40,110 cells) in 937 ms with 23,524 KiB peak RSS. Both completed inventory,
+topology and schema inspection under the defaults. These observations establish a
+reproducible small-workload baseline, not a large-file performance guarantee. Timings
+and residency depend on the host and allocator.

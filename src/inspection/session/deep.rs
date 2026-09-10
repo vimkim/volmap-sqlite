@@ -30,6 +30,7 @@ impl Default for DeepLimits {
 struct JobData {
     status: DeepStatus,
     result: Option<DeepResult>,
+    reservation: u64,
 }
 
 pub struct DeepJob {
@@ -38,6 +39,7 @@ pub struct DeepJob {
     data: Mutex<JobData>,
     ready: Condvar,
     cancelled: AtomicBool,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl DeepJob {
@@ -56,9 +58,11 @@ impl DeepJob {
                     result_revision: None,
                 },
                 result: None,
+                reservation: 0,
             }),
             ready: Condvar::new(),
             cancelled: AtomicBool::new(false),
+            worker: Mutex::new(None),
         }
     }
 
@@ -78,12 +82,28 @@ impl DeepJob {
                 .wait(data)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
-        data.status.clone()
+        let status = data.status.clone();
+        drop(data);
+        // Serialize joiners as well as terminal receipts: every waiter sees cleanup completed.
+        let mut worker = self
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(handle) = worker.take() {
+            let _ = handle.join();
+        }
+        status
     }
 
     #[must_use]
     pub fn status(&self) -> DeepStatus {
         self.lock().status.clone()
+    }
+
+    /// True once cancellation was requested for this worker.
+    #[must_use]
+    pub fn cancellation_requested(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
     }
 
     /// Requests cancellation without stopping unrelated jobs or invalidating a revision.
@@ -104,6 +124,26 @@ impl DeepJob {
 }
 
 impl InspectionSession {
+    /// Closes deep admission, requests cancellation and joins every admitted deep worker.
+    /// The adapter joins its fast-scan worker after this returns.
+    pub fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        let _ = self.stop(ScanControl::Cancel);
+        let jobs: Vec<_> = self
+            .deep_jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        for job in &jobs {
+            job.cancel();
+        }
+        for job in jobs {
+            let _ = job.wait();
+        }
+    }
+
     /// Starts asynchronous reconstruction for an explicit current-revision cell selector.
     #[must_use]
     pub fn request_deep(
@@ -168,11 +208,15 @@ impl InspectionSession {
             }
             Arc::clone(graph)
         };
-        if !self.admit_deep(&job, budget) {
+        if !self.admit_deep(&job, budget, &graph) {
             return job;
         }
         let session = Arc::clone(self);
         let worker = Arc::clone(&job);
+        let mut handle = job
+            .worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let spawned = std::thread::Builder::new()
             .name("selected-cell".into())
             .spawn(move || {
@@ -183,9 +227,11 @@ impl InspectionSession {
                     worker.finish(DeepState::Failed, "worker_failed");
                 }
             });
-        if spawned.is_err() {
-            job.finish(DeepState::Failed, "worker_unavailable");
+        match spawned {
+            Ok(worker) => *handle = Some(worker),
+            Err(_) => job.finish(DeepState::Failed, "worker_unavailable"),
         }
+        drop(handle);
         job
     }
 
@@ -197,11 +243,32 @@ impl InspectionSession {
         self
     }
 
-    fn admit_deep(&self, job: &Arc<DeepJob>, budget: DeepBudget) -> bool {
+    fn admit_deep(
+        &self,
+        job: &Arc<DeepJob>,
+        budget: DeepBudget,
+        graph: &crate::inspection::InspectionGraph,
+    ) -> bool {
+        let payload = graph.pages[(job.target.page_number - 1) as usize]
+            .detail
+            .cells[usize::from(job.target.cell_index)]
+        .payload_size
+        .unwrap_or(0);
+        {
+            let mut data = job.lock();
+            data.status.coverage.payload_bytes = Some(payload.to_string());
+            data.status.coverage.remainder_bytes = Some(payload.to_string());
+            data.status.coverage.stopping_page = Some(job.target.page_number);
+            data.status.coverage.stopping_payload_offset = Some("0".into());
+        }
         let mut jobs = self
             .deep_jobs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.shutting_down.load(Ordering::Acquire) {
+            job.finish(DeepState::Cancelled, "session_shutdown");
+            return false;
+        }
         let limits = self.deep_limits;
         let active = jobs
             .values()
@@ -214,6 +281,7 @@ impl InspectionSession {
         } else if budget.max_payload_bytes > limits.per_job.max_payload_bytes
             || budget.max_overflow_pages > limits.per_job.max_overflow_pages
             || budget.max_values > limits.per_job.max_values
+            || budget.max_decoded_bytes > limits.per_job.max_decoded_bytes
         {
             Some("session_per_job_budget")
         } else {
@@ -223,6 +291,31 @@ impl InspectionSession {
             job.finish(DeepState::BudgetStopped, reason);
             return false;
         }
+        let reservation = payload
+            .saturating_mul(8)
+            .saturating_add(
+                u64::from(budget.max_values)
+                    .min(payload)
+                    .saturating_mul(1024),
+            )
+            .saturating_add(revision_reservation(graph));
+        let reserved = jobs.values().fold(0_u64, |n, prior| {
+            let data = prior.lock();
+            if data.status.state == DeepState::Pending {
+                n.saturating_add(data.reservation)
+            } else {
+                n
+            }
+        });
+        let ceiling = self.lock().status.operational_budget.max_resident_bytes;
+        if !crate::inspection::budget::memory_available(
+            ceiling,
+            reserved.saturating_add(reservation),
+        ) {
+            job.finish(DeepState::BudgetStopped, "resident_memory_budget");
+            return false;
+        }
+        job.lock().reservation = reservation;
         jobs.insert(job.id.clone(), Arc::clone(job));
         true
     }
@@ -257,6 +350,22 @@ impl InspectionSession {
             return;
         }
         let inputs = Arc::clone(&self.lock().inputs);
+        let ceiling = self.lock().status.operational_budget.max_resident_bytes;
+        let payload_bytes = graph.pages[(job.target.page_number - 1) as usize]
+            .detail
+            .cells[usize::from(job.target.cell_index)]
+        .payload_size
+        .unwrap_or(0);
+        // Payload storage, UTF-16 conversion scratch, decoded text and retained evidence coexist.
+        let reservation = payload_bytes.saturating_mul(8).saturating_add(
+            u64::from(budget.max_values)
+                .min(payload_bytes)
+                .saturating_mul(1024),
+        );
+        if !crate::inspection::budget::memory_available(ceiling, reservation) {
+            job.finish(DeepState::BudgetStopped, "resident_memory_budget");
+            return;
+        }
         let result = deep::inspect(&inputs.file, graph, &job.target, budget, &mut |coverage| {
             job.lock().status.coverage = coverage.clone();
             if observe(&job.status()) != ScanControl::Continue {
@@ -277,6 +386,13 @@ impl InspectionSession {
             }
         };
         // Preparation holds no publication locks: cancellation can win during the copy.
+        // Copying a revision duplicates its relationship and page evidence as well as the payload.
+        let graph_reservation = revision_reservation(graph);
+        if !crate::inspection::budget::memory_available(ceiling, graph_reservation) {
+            job.lock().status.coverage = decoded.evidence.coverage;
+            job.finish(DeepState::BudgetStopped, "resident_memory_budget");
+            return;
+        }
         let mut enriched = graph.clone();
         enriched
             .deep_inspections
@@ -374,4 +490,18 @@ impl InspectionSession {
         }
         job.lock().result.clone().ok_or(DeepState::InvalidTarget)
     }
+}
+
+fn revision_reservation(graph: &crate::inspection::InspectionGraph) -> u64 {
+    graph
+        .pages
+        .iter()
+        .fold(0_u64, |n, page| {
+            n.saturating_add(4096)
+                .saturating_add((page.detail.cells.len() as u64).saturating_mul(4096))
+        })
+        .saturating_add((graph.relationship_claims.len() as u64).saturating_mul(2048))
+        .saturating_add(graph.traversals.iter().fold(0_u64, |n, t| {
+            n.saturating_add((t.validated_prefix.len() as u64).saturating_mul(64))
+        }))
 }

@@ -611,11 +611,16 @@ fn record(bytes: &[u8], payload: u64, schema_format: u32) -> RecordDetail {
     detail
 }
 
-pub(super) fn read_page(file: &File, number: u32, geometry: &DatabaseGeometry) -> PageDetail {
+pub(super) fn read_page_with_cell_budget(
+    file: &File,
+    number: u32,
+    geometry: &DatabaseGeometry,
+    remaining: u64,
+) -> Result<PageDetail, ()> {
     let mut bytes = vec![0; geometry.page_size as usize];
     let offset = u64::from(number - 1) * u64::from(geometry.page_size);
     if file.read_exact_at(&mut bytes, offset).is_err() {
-        return PageDetail {
+        return Ok(PageDetail {
             allocation_role: None,
             kind: None,
             header: None,
@@ -624,14 +629,18 @@ pub(super) fn read_page(file: &File, number: u32, geometry: &DatabaseGeometry) -
             freeblocks: vec![],
             diagnostics: vec!["page_read_failed"],
             coverage: LocalCoverage::Partial,
-        };
+        });
     }
-    Page {
+    let base = if number == 1 { 100 } else { 0 };
+    if matches!(bytes[base], 2 | 5 | 10 | 13) && u64::from(word(&bytes, base + 3)) > remaining {
+        return Err(());
+    }
+    Ok(Page {
         bytes: &bytes,
         number,
         size: geometry.page_size,
         usable: geometry.usable_size as usize,
         schema_format: geometry.schema_format,
     }
-    .inspect()
+    .inspect())
 }

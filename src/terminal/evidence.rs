@@ -20,27 +20,7 @@ pub(super) fn lines(focus: &Focus, graph: Option<&InspectionGraph>) -> Vec<Strin
     };
     let mut lines = Vec::new();
     match focus {
-        Focus::Database => {
-            lines.push(format!("Snapshot: {}", graph.snapshot.id));
-            let geometry = &graph.snapshot.geometry;
-            lines.push(format!(
-                "{} pages | page size {} | usable {} | reserved {}",
-                geometry.page_count,
-                geometry.page_size,
-                geometry.usable_size,
-                geometry.reserved_bytes
-            ));
-            lines.push(format!(
-                "Topology coverage: {:?}",
-                graph.topology_coverage.reason
-            ));
-            for sidecar in &graph.sidecars {
-                lines.push(format!(
-                    "{}: {} — {}",
-                    sidecar.kind, sidecar.state, sidecar.consequence
-                ));
-            }
-        }
+        Focus::Database => return database_lines(graph),
         Focus::Schema => lines.push(format!(
             "Direct schema coverage: {:?}; {} objects",
             graph.schema.state,
@@ -107,6 +87,47 @@ pub(super) fn lines(focus: &Focus, graph: Option<&InspectionGraph>) -> Vec<Strin
         }
         Focus::Help => unreachable!(),
     }
+    lines
+}
+
+fn database_lines(graph: &InspectionGraph) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!("Snapshot: {}", graph.snapshot.id));
+    lines.push(format!(
+        "Next page: {}; remaining pages: {}",
+        graph
+            .coverage
+            .next_page
+            .map_or_else(|| "none".into(), |n| n.to_string()),
+        graph
+            .coverage
+            .remainder
+            .map_or_else(|| "unknown".into(), |n| n.to_string())
+    ));
+    lines.push(format!(
+        "Topology boundary: {:?}; {} / {:?} units; next {:?}; remainder {:?}",
+        graph.topology_coverage.phase,
+        graph.topology_coverage.evaluated,
+        graph.topology_coverage.total,
+        graph.topology_coverage.next,
+        graph.topology_coverage.remainder
+    ));
+    let geometry = &graph.snapshot.geometry;
+    lines.push(format!(
+        "{} pages | page size {} | usable {} | reserved {}",
+        geometry.page_count, geometry.page_size, geometry.usable_size, geometry.reserved_bytes
+    ));
+    lines.push(format!(
+        "Topology coverage: {:?}",
+        graph.topology_coverage.reason
+    ));
+    for sidecar in &graph.sidecars {
+        lines.push(format!(
+            "{}: {} — {}",
+            sidecar.kind, sidecar.state, sidecar.consequence
+        ));
+    }
+
     lines
 }
 
@@ -329,4 +350,25 @@ fn page_header_lines(page: &crate::inspection::PageEntity) -> Vec<String> {
         }
     }
     lines
+}
+
+pub(super) fn budget_lines(status: &crate::inspection::SessionStatus) -> Vec<String> {
+    let budget = status.operational_budget;
+    let traversal = status.traversal_budget;
+    vec![
+        format!(
+            "Resident memory ceiling: {} bytes",
+            budget.max_resident_bytes
+        ),
+        format!(
+            "Processed cells: {}; work units per phase: {}; freelist trunk chain: {}",
+            budget.max_processed_cells, budget.max_phase_units, budget.max_freelist_trunks
+        ),
+        format!(
+            "B-tree depth: {}; overflow chain: {}; total traversal pages: {}",
+            traversal.max_btree_pages(),
+            traversal.max_overflow_pages(),
+            traversal.max_total_pages()
+        ),
+    ]
 }

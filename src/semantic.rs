@@ -35,7 +35,8 @@ const EXPECTED_QUERY_MASK: u8 =
 static QUERY_MASK: AtomicU8 = AtomicU8::new(0);
 
 /// Configurable operational budgets; larger values are clamped to security ceilings.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SemanticBudget {
     pub max_copy_bytes: u64,
     pub max_schema_records: usize,
@@ -55,7 +56,7 @@ impl Default for SemanticBudget {
 }
 
 impl SemanticBudget {
-    fn bounded(self) -> Self {
+    pub(crate) fn bounded(self) -> Self {
         let defaults = Self::default();
         Self {
             max_copy_bytes: self.max_copy_bytes.min(defaults.max_copy_bytes),
@@ -82,8 +83,78 @@ fn trace_query(sql: &str) {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticMetadata {
+    pub coverage: SemanticCoverage,
     pub state: &'static str,
     pub tables: Vec<TableDescription>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticPhase {
+    Admission,
+    Copy,
+    Helper,
+    Output,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticReason {
+    NotRequested,
+    HelperUnavailable,
+    CopyByteBudget,
+    SchemaIncomplete,
+    SchemaRecordBudget,
+    TimeBudget,
+    OutputByteBudget,
+    Cancelled,
+    HelperProtocol,
+    Complete,
+    WorkBudget,
+    OperatorStop,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn decimal<S: serde::Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&value.to_string())
+}
+#[allow(clippy::ref_option)]
+fn optional_decimal<S: serde::Serializer>(
+    value: &Option<u64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(value) => serializer.serialize_some(&value.to_string()),
+        None => serializer.serialize_none(),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticCoverage {
+    pub phase: SemanticPhase,
+    pub reason: SemanticReason,
+    #[serde(serialize_with = "decimal")]
+    pub evaluated_bytes: u64,
+    #[serde(serialize_with = "decimal")]
+    pub copied_bytes: u64,
+    #[serde(serialize_with = "optional_decimal")]
+    pub total_bytes: Option<u64>,
+    #[serde(serialize_with = "optional_decimal")]
+    pub remainder_bytes: Option<u64>,
+}
+
+impl Default for SemanticCoverage {
+    fn default() -> Self {
+        Self {
+            phase: SemanticPhase::Admission,
+            reason: SemanticReason::NotRequested,
+            evaluated_bytes: 0,
+            copied_bytes: 0,
+            total_bytes: None,
+            remainder_bytes: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -98,6 +169,7 @@ pub struct TableDescription {
 impl SemanticMetadata {
     pub(crate) fn unavailable() -> Self {
         Self {
+            coverage: SemanticCoverage::default(),
             state: "unavailable",
             tables: Vec::new(),
         }
@@ -126,44 +198,36 @@ pub(crate) fn enrich(
     file: &File,
     schema: &SchemaEvidence,
     budget: SemanticBudget,
-    cancelled: impl Fn() -> bool,
+    cancelled: impl Fn(&SemanticCoverage) -> bool,
 ) -> SemanticMetadata {
-    run(file, schema, budget.bounded(), cancelled).unwrap_or_else(SemanticMetadata::unavailable)
+    let mut coverage = SemanticCoverage {
+        reason: SemanticReason::HelperUnavailable,
+        ..SemanticCoverage::default()
+    };
+    let mut metadata = run(file, schema, budget.bounded(), cancelled, &mut coverage)
+        .unwrap_or_else(SemanticMetadata::unavailable);
+    metadata.coverage = coverage;
+    metadata
 }
 
 fn run(
     file: &File,
     schema: &SchemaEvidence,
     budget: SemanticBudget,
-    cancelled: impl Fn() -> bool,
+    cancelled: impl Fn(&SemanticCoverage) -> bool,
+    coverage: &mut SemanticCoverage,
 ) -> Option<SemanticMetadata> {
     let start = Instant::now();
     let timeout = Duration::from_millis(budget.timeout_ms);
-    let length = file.metadata().ok()?.len();
-    if length > budget.max_copy_bytes
-        || schema.state != crate::inspection::SchemaState::Complete
-        || budget.max_schema_records == 0
-        || schema.objects.len() > budget.max_schema_records
-        || budget.timeout_ms == 0
-        || budget.max_output_bytes == 0
-        || cancelled()
-    {
+    let directory = prepare_copy(file, schema, budget, &cancelled, coverage, start)?;
+    coverage.phase = SemanticPhase::Helper;
+    coverage.evaluated_bytes = 0;
+    coverage.total_bytes = None;
+    coverage.remainder_bytes = None;
+    if cancelled(coverage) {
+        coverage.reason = SemanticReason::Cancelled;
         return None;
     }
-    let directory = tempfile::tempdir().ok()?;
-    let mut copy = File::create(directory.path().join("snapshot.sqlite")).ok()?;
-    let mut offset = 0;
-    let mut buffer = [0; 16384];
-    while offset < length {
-        if cancelled() || start.elapsed() >= timeout {
-            return None;
-        }
-        let count = usize::try_from((length - offset).min(buffer.len() as u64)).ok()?;
-        file.read_exact_at(&mut buffer[..count], offset).ok()?;
-        copy.write_all(&buffer[..count]).ok()?;
-        offset += count as u64;
-    }
-    drop(copy);
     let mut child = Command::new(std::env::current_exe().ok()?)
         .arg("--private-semantic-helper")
         .current_dir(directory.path())
@@ -193,7 +257,15 @@ fn run(
         return None;
     };
     let success = loop {
-        if !input_ok || cancelled() || start.elapsed() >= timeout {
+        let cancellation = cancelled(coverage);
+        if !input_ok || cancellation || start.elapsed() >= timeout {
+            coverage.reason = if cancellation {
+                SemanticReason::Cancelled
+            } else if !input_ok {
+                SemanticReason::HelperProtocol
+            } else {
+                SemanticReason::TimeBudget
+            };
             let _ = child.kill();
             let _ = child.wait();
             break false;
@@ -209,13 +281,93 @@ fn run(
         }
     };
     let bytes = reader.join().ok()??;
-    if !success || bytes.len() as u64 > budget.max_output_bytes {
+    if !success {
         return None;
     }
-    if cancelled() || start.elapsed() >= timeout {
+    coverage.phase = SemanticPhase::Output;
+    coverage.evaluated_bytes = bytes.len() as u64;
+    coverage.total_bytes = None;
+    coverage.remainder_bytes = None;
+    if bytes.len() as u64 > budget.max_output_bytes {
+        coverage.reason = SemanticReason::OutputByteBudget;
         return None;
     }
-    validate_reply(schema, &bytes)
+    if cancelled(coverage) {
+        coverage.reason = SemanticReason::Cancelled;
+        return None;
+    }
+    if start.elapsed() >= timeout {
+        coverage.reason = SemanticReason::TimeBudget;
+        return None;
+    }
+    let reply = validate_reply(schema, &bytes)?;
+    coverage.reason = SemanticReason::Complete;
+    coverage.total_bytes = Some(bytes.len() as u64);
+    coverage.remainder_bytes = Some(0);
+    Some(reply)
+}
+
+fn prepare_copy(
+    file: &File,
+    schema: &SchemaEvidence,
+    budget: SemanticBudget,
+    cancelled: &impl Fn(&SemanticCoverage) -> bool,
+    coverage: &mut SemanticCoverage,
+    start: Instant,
+) -> Option<tempfile::TempDir> {
+    let timeout = Duration::from_millis(budget.timeout_ms);
+    let length = file.metadata().ok()?.len();
+    coverage.phase = SemanticPhase::Copy;
+    coverage.total_bytes = Some(length);
+    coverage.remainder_bytes = Some(length);
+    for (stopped, reason) in [
+        (
+            length > budget.max_copy_bytes,
+            SemanticReason::CopyByteBudget,
+        ),
+        (
+            schema.state != crate::inspection::SchemaState::Complete,
+            SemanticReason::SchemaIncomplete,
+        ),
+        (
+            budget.max_schema_records == 0 || schema.objects.len() > budget.max_schema_records,
+            SemanticReason::SchemaRecordBudget,
+        ),
+        (budget.timeout_ms == 0, SemanticReason::TimeBudget),
+        (
+            budget.max_output_bytes == 0,
+            SemanticReason::OutputByteBudget,
+        ),
+        (cancelled(coverage), SemanticReason::Cancelled),
+    ] {
+        if stopped {
+            coverage.reason = reason;
+            return None;
+        }
+    }
+    let directory = tempfile::tempdir().ok()?;
+    let mut copy = File::create(directory.path().join("snapshot.sqlite")).ok()?;
+    let mut offset = 0;
+    let mut buffer = [0; 16384];
+    while offset < length {
+        if cancelled(coverage) {
+            coverage.reason = SemanticReason::Cancelled;
+            return None;
+        }
+        if start.elapsed() >= timeout {
+            coverage.reason = SemanticReason::TimeBudget;
+            return None;
+        }
+        let count = usize::try_from((length - offset).min(buffer.len() as u64)).ok()?;
+        file.read_exact_at(&mut buffer[..count], offset).ok()?;
+        copy.write_all(&buffer[..count]).ok()?;
+        offset += count as u64;
+        coverage.evaluated_bytes = offset;
+        coverage.copied_bytes = offset;
+        coverage.remainder_bytes = Some(length - offset);
+    }
+    drop(copy);
+    Some(directory)
 }
 
 fn validate_reply(schema: &SchemaEvidence, bytes: &[u8]) -> Option<SemanticMetadata> {
@@ -254,6 +406,7 @@ fn validate_reply(schema: &SchemaEvidence, bytes: &[u8]) -> Option<SemanticMetad
         return None;
     }
     Some(SemanticMetadata {
+        coverage: SemanticCoverage::default(),
         state: "available",
         tables,
     })

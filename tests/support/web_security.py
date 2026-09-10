@@ -185,7 +185,13 @@ with tempfile.TemporaryDirectory() as directory:
                 assert time.monotonic() < deadline
                 time.sleep(.01)
             assert code == 507, (flag, code, body)
-            assert json.loads(body) == {"state": "budget_stopped", "reason": reason}, body
+            receipt = json.loads(body)
+            assert receipt["state"] == "budget_stopped" and receipt["reason"] == reason, body
+            coverage = receipt["coverage"]
+            assert coverage["scope"] == "response_serialization"
+            assert coverage["stoppingBoundary"] == reason
+            assert coverage["evaluated"] > 0
+            assert coverage["total"] is None and coverage["remainder"] is None
             assert len(body) <= 1024 and b"private-value-marker" not in body
             assert headers["cache-control"] == "no-store"
 
@@ -295,7 +301,16 @@ with tempfile.TemporaryDirectory() as directory:
         assert job["state"] == "completed", job
         code, headers, body = request(port, job_url + "/result", "POST", json.dumps(target), origin)
         assert code == 507, (code, body)
-        assert json.loads(body) == {"state": "budget_stopped", "reason": "response_byte_budget"}
+        receipt = json.loads(body)
+        assert receipt["state"] == "budget_stopped" and receipt["reason"] == "response_byte_budget"
+        assert receipt["coverage"] == {
+            "scope": "response_serialization",
+            "evaluated": receipt["coverage"]["evaluated"],
+            "total": None,
+            "remainder": None,
+            "stoppingBoundary": "response_byte_budget",
+        }
+        assert receipt["coverage"]["evaluated"] > 0
         assert b"oversize-private-marker" not in body and directory.encode() not in body
         assert headers["cache-control"] == "no-store"
         assert json.loads(request(port, base)[2])["revision"] == 2

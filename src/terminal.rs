@@ -412,6 +412,59 @@ impl TerminalFlow {
         if let Some(diagnostic) = &status.diagnostic {
             evidence.push(format!("{}: {}", diagnostic.code, diagnostic.message));
         }
+        if matches!(self.focus(), Focus::Database | Focus::Help) {
+            evidence.extend(evidence::budget_lines(status));
+            evidence.push(format!(
+                "Concurrent deep jobs: {}; retained jobs: {}",
+                status.deep_limits.max_concurrent_jobs, status.deep_limits.max_jobs
+            ));
+            let budget = status.deep_limits.per_job;
+            evidence.push(format!(
+                "Deep payload: {} bytes; decoded: {} bytes; values: {}; overflow pages: {}",
+                budget.max_payload_bytes,
+                budget.max_decoded_bytes,
+                budget.max_values,
+                budget.max_overflow_pages
+            ));
+            evidence.push(format!(
+                "Schema decoding: {} bytes; WAL frames: {}",
+                status.schema_budget.max_decoded_bytes, status.sidecar_budget.max_wal_frames
+            ));
+            if let Some(budget) = status.semantic_budget {
+                evidence.push(format!(
+                    "Metadata helper: {} copied bytes; {} records; {} ms; {} output bytes",
+                    budget.max_copy_bytes,
+                    budget.max_schema_records,
+                    budget.timeout_ms,
+                    budget.max_output_bytes
+                ));
+            }
+            for work in &status.work_coverage {
+                evidence.push(format!(
+                    "{:?}: {} / {:?} units; next {:?}; remainder {:?}; {:?} {:?}",
+                    work.phase,
+                    work.evaluated,
+                    work.total,
+                    work.next,
+                    work.remainder,
+                    work.reason,
+                    work.limit
+                ));
+            }
+            if let Some(graph) = &self.graph {
+                let c = &graph.semantic_metadata.coverage;
+                evidence.push(format!(
+                    "Helper coverage: {:?} {:?}; {} / {:?} bytes; remainder {:?}",
+                    c.phase, c.reason, c.evaluated_bytes, c.total_bytes, c.remainder_bytes
+                ));
+            }
+        }
+        if let Some(work) = status.work_progress {
+            evidence.push(format!(
+                "Work: {:?}; {} / {:?} units",
+                work.phase, work.evaluated, work.total
+            ));
+        }
         evidence.extend(self.status_lines(status));
         evidence
     }

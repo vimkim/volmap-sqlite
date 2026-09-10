@@ -59,7 +59,8 @@ pub struct SchemaEvidence {
     pub stopping_cell: Option<CellIdentity>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SchemaBudget {
     pub max_decoded_bytes: u64,
 }
@@ -187,8 +188,12 @@ fn index_trees(
 fn check_stop(control: &WorkControl) -> Result<(), &'static str> {
     match control.traversal_reason() {
         Some(super::TraversalStopReason::OperatorStop) => Err("schema_operator_stop"),
+        Some(super::TraversalStopReason::Budget) => Err("schema_work_budget"),
         Some(_) => Err("schema_cancelled"),
-        None => Ok(()),
+        None => {
+            control.advance(super::TopologyPhase::SchemaInspection);
+            Ok(())
+        }
     }
 }
 
@@ -201,6 +206,7 @@ pub(super) fn inspect(
     budget: SchemaBudget,
     checkpoint: &mut impl FnMut(),
 ) -> SchemaEvidence {
+    control.begin_phase(super::TopologyPhase::SchemaInspection, None);
     let trees = match index_trees(topology, pages, control, checkpoint) {
         Ok(trees) => trees,
         Err(code) => {
@@ -211,6 +217,7 @@ pub(super) fn inspect(
         }
     };
     let Some(schema_tree) = trees.roots.get(&1).filter(|tree| tree.pages.contains(&1)) else {
+        control.mark_unavailable();
         return SchemaEvidence::unavailable(budget);
     };
     let mut result = SchemaEvidence {
@@ -269,6 +276,16 @@ pub(super) fn inspect(
     }
     result.decoded_bytes = (budget.max_decoded_bytes - reader.remaining).to_string();
     reconcile_attribution(&mut result, topology, &trees, control);
+    if result.diagnostics.contains(&"schema_decode_budget")
+        || result
+            .objects
+            .iter()
+            .any(|object| object.diagnostics.contains(&"schema_decode_budget"))
+    {
+        control.mark_local_budget(super::BudgetKind::SchemaDecodedBytes);
+    } else if control.traversal_reason().is_none() {
+        control.finish_phase(super::TopologyPhase::SchemaInspection);
+    }
     result
 }
 
@@ -577,6 +594,9 @@ impl PayloadReader<'_> {
             .as_ref()
             .ok_or("schema_payload_unavailable")?;
         let size = cell.payload_size.ok_or("schema_payload_unavailable")?;
+        if !self.control.reserve_memory(size.saturating_mul(8)) {
+            return Err("schema_work_budget");
+        }
         self.remaining = self
             .remaining
             .checked_sub(size)

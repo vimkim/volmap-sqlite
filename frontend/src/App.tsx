@@ -9,7 +9,7 @@ import { PointerMap, type PointerMapEvidence } from "./PointerMap";
 import { Sidecars, type SidecarEvidence } from "./Sidecars";
 import { Freelist, type FreelistEvidence } from "./Freelist";
 
-import { DeepCell, type DeepEvidence } from "./DeepCell";
+import { DeepCell, type DeepEvidence, type Budget } from "./DeepCell";
 import { SchemaFlow, SchemaObjects, schemaSelector, selectorKey, type EntitySelector, type SchemaEvidence } from "./SchemaFlow";
 
 type TextEncoding = "utf8" | "utf16_le" | "utf16_be";
@@ -17,6 +17,7 @@ type TopologyPhase = "pointer_map_validation" | "pointer_map_reconciliation" | "
 
 export interface InspectionGraph {
   semanticMetadata: {
+    coverage?: { phase: string; reason: string; evaluatedBytes: string; totalBytes: string | null; remainderBytes: string | null };
     state: "available" | "unavailable";
     tables: { identity: { pageNumber: number; index: number }; columnCount: number; strict: boolean; withoutRowid: boolean }[];
   };
@@ -69,11 +70,20 @@ interface Coverage {
   evaluated: number;
   total: number | null;
   nextPage: number | null;
-  reason: "complete" | "cancelled" | "operator_stop" | "input_changed" | "fatal_geometry" | "allocation_failure";
+  reason: "complete" | "cancelled" | "operator_stop" | "input_changed" | "fatal_geometry" | "allocation_failure" | "cell_budget" | "resident_memory_budget";
   remainder: number | null;
 }
 
 export interface SessionStatus {
+  operationalBudget?: { maxProcessedCells: number; maxPhaseUnits: number; maxResidentBytes: number; maxFreelistTrunks?: number };
+  deepLimits?: { maxJobs: number; maxConcurrentJobs: number; perJob: Budget };
+  webLimits?: { requestBytes: number; responseBytes: number; collectionItems: number; concurrentRequests: number };
+  traversalBudget?: { maxBtreePages: number; maxOverflowPages: number; maxTotalPages: string };
+  schemaBudget?: { maxDecodedBytes: number };
+  sidecarBudget?: { maxWalFrames: number };
+  semanticBudget?: { maxCopyBytes: number; maxSchemaRecords: number; timeoutMs: number; maxOutputBytes: number } | null;
+  workCoverage?: { phase: string; evaluated: number; total: number | null; next: number | null; remainder: number | null; reason: string; limit: string | null }[];
+  workProgress?: { phase: string; evaluated: number; total: number | null } | null;
   sessionId: string;
   availableRevisions: number[];
   snapshotId: string;
@@ -210,6 +220,7 @@ function Atlas({ graph, status, viewRevision, onRevision }: { graph: InspectionG
         <GeometryFact label="Topology next unit" value={graph.topologyCoverage.next?.toLocaleString() ?? "none"} />
         <GeometryFact label="Topology remainder" value={graph.topologyCoverage.remainder?.toLocaleString() ?? "unknown"} />
         <GeometryFact label="Topology next phase" value={graph.topologyCoverage.nextPhase?.replaceAll("_", " ") ?? "none"} />
+        {graph.semanticMetadata.coverage && <GeometryFact label="Helper coverage" value={`${graph.semanticMetadata.coverage.phase}: ${graph.semanticMetadata.coverage.reason}; ${graph.semanticMetadata.coverage.evaluatedBytes} / ${graph.semanticMetadata.coverage.totalBytes ?? "unknown"} bytes; remaining ${graph.semanticMetadata.coverage.remainderBytes ?? "unknown"}`} />}
         <GeometryFact label="B-tree path limit" value={graph.topologyCoverage.traversalBudget.maxBtreePages.toLocaleString()} />
         <GeometryFact label="Overflow path limit" value={graph.topologyCoverage.traversalBudget.maxOverflowPages.toLocaleString()} />
         <GeometryFact label="Aggregate traversal limit" value={BigInt(graph.topologyCoverage.traversalBudget.maxTotalPages).toLocaleString()} />
@@ -317,7 +328,7 @@ function Atlas({ graph, status, viewRevision, onRevision }: { graph: InspectionG
         onSelectPage={selectPage}
         evidenceByte={evidenceLocus?.page.pageNumber === active.number ? evidenceLocus.range.pageOffset : null}
       />}
-      {active && selection.type === "cell" && <DeepCell key={`${graph.snapshot.id}:${selection.pageNumber}:${selection.cellIndex}`}
+      {active && selection.type === "cell" && <DeepCell limits={status.deepLimits?.perJob} key={`${graph.snapshot.id}:${selection.pageNumber}:${selection.cellIndex}`}
         target={{ sessionId: status.sessionId, snapshotId: graph.snapshot.id, revision: graph.revision, pageNumber: selection.pageNumber, cellIndex: selection.cellIndex }}
         currentRevision={status.revision} onPublished={onRevision} /> }
     </main>
@@ -350,6 +361,29 @@ function InspectionNotice({ status }: { status: SessionStatus }) {
       {coverage.nextPage !== null && ` Stopped before page ${coverage.nextPage}.`}
       {" "}Reason: {coverage.reason.replaceAll("_", " ")}.
     </p>}
+    {status.workProgress && <p>Work: {status.workProgress.phase.replaceAll("_", " ")} · {status.workProgress.evaluated} / {status.workProgress.total ?? "unknown"} units</p>}
+    {status.operationalBudget && <details><summary>Effective inspection budgets</summary>
+      <p>Resident memory: {status.operationalBudget.maxResidentBytes.toLocaleString()} bytes</p>
+      <p>Processed cells: {status.operationalBudget.maxProcessedCells.toLocaleString()}</p>
+      <p>Freelist trunk chain: {status.operationalBudget.maxFreelistTrunks?.toLocaleString() ?? "unknown"}</p>
+      <p>Work units per phase: {status.operationalBudget.maxPhaseUnits.toLocaleString()}</p>
+      {status.deepLimits && <>
+        <p>Concurrent deep jobs: {status.deepLimits.maxConcurrentJobs}; retained jobs: {status.deepLimits.maxJobs}</p>
+        <p>Reconstructed payload: {status.deepLimits.perJob.maxPayloadBytes.toLocaleString()} bytes; decoded values: {status.deepLimits.perJob.maxDecodedBytes.toLocaleString()} bytes</p>
+        <p>Deep overflow pages: {status.deepLimits.perJob.maxOverflowPages.toLocaleString()}; value count: {status.deepLimits.perJob.maxValues.toLocaleString()}</p>
+      </>}
+      {status.traversalBudget && <p>B-tree depth: {status.traversalBudget.maxBtreePages}; overflow chain: {status.traversalBudget.maxOverflowPages}; aggregate traversal pages: {status.traversalBudget.maxTotalPages}</p>}
+      {status.schemaBudget && <p>Schema decoding: {status.schemaBudget.maxDecodedBytes.toLocaleString()} bytes</p>}
+      {status.sidecarBudget && <p>WAL frames: {status.sidecarBudget.maxWalFrames.toLocaleString()}</p>}
+      {status.semanticBudget && <p>Metadata helper: {status.semanticBudget.maxCopyBytes.toLocaleString()} copied bytes; {status.semanticBudget.maxSchemaRecords} records; {status.semanticBudget.timeoutMs} ms; {status.semanticBudget.maxOutputBytes.toLocaleString()} output bytes</p>}
+      {status.webLimits && <>
+        <p>Request body: {status.webLimits.requestBytes.toLocaleString()} bytes; response: {status.webLimits.responseBytes.toLocaleString()} bytes</p>
+        <p>Concurrent HTTP requests: {status.webLimits.concurrentRequests}; response collection items: {status.webLimits.collectionItems.toLocaleString()}</p>
+      </>}
+    </details>}
+    {!!status.workCoverage?.length && <details><summary>Inspection work coverage</summary>
+      {status.workCoverage.map((work, index) => <p key={index}>{work.phase.replaceAll("_", " ")}: {work.evaluated} / {work.total ?? "unknown"} units; next: {work.next ?? "none"}; remaining: {work.remainder ?? "unknown"}; {work.reason}{work.limit ? ` (${work.limit})` : ""}</p>)}
+    </details>}
     {status.diagnostic && <p role="alert">{status.diagnostic.message}</p>}
     {status.state === "invalidated" && <p>Navigation and further inspection are disabled. Open a new frozen copy to continue.</p>}
   </section>;

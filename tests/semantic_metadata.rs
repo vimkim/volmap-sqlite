@@ -95,6 +95,11 @@ fn main() {
 
 fn physical(mut graph: Value) -> Value {
     graph.as_object_mut().unwrap().remove("semanticMetadata");
+    // Helper activity is operational coverage, not a change to physical evidence.
+    graph["workCoverage"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|receipt| receipt["phase"] != "semantic_helper");
     graph["snapshot"]["id"] = Value::Null;
     graph["snapshot"]["source"]["id"] = Value::Null;
     graph

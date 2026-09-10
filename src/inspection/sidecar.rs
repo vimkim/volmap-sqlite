@@ -13,7 +13,8 @@ mod wal;
 pub use wal::{WalEvidence, WalFrame};
 
 /// Resource ceiling for retained WAL frame evidence, independent of main-file traversal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SidecarBudget {
     pub max_wal_frames: u64,
 }
