@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Inspect B-tree pages and structural cells
 
-**Status:** resolved
+**Status:** done
 
 - [x] The database-header first-trunk pointer and declared freelist count are represented as physical evidence and relationship claims.
 - [x] Freelist trunk pages expose their next-trunk claim and bounded leaf-page claims only after prerequisite bounds checks succeed.
@@ -42,3 +42,10 @@ Validation:
 ## Comments
 
 - 2026-09-08: Implemented from baseline `e1d3c5d439a3dae0c6d6ae3452415580b8588447` on `main`.
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `resolved`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).

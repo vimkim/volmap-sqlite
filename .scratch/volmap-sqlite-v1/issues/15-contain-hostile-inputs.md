@@ -36,3 +36,10 @@ Standards review: 0 findings. Spec review: 1 coverage finding addressed, 0 remai
 The complete requirement audit and validation details are in `fuzz/VALIDATION.md`;
 profile commands, budgets, boundary mapping and reproducer instructions are in
 `fuzz/README.md`. Finite fuzz observations do not claim exhaustive input coverage.
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `done`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).

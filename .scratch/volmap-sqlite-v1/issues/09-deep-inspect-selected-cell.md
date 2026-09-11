@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Navigate B-tree topology and overflow claims; 08: Follow schema attribution in schema flow
 
-**Status:** resolved
+**Status:** done
 
 - [x] A deep-inspection request contains a session-, snapshot-, revision-, and cell-scoped selector that must resolve to exactly one existing physical cell.
 - [x] The request runs asynchronously and exposes pending, completed, cancelled, budget-stopped, invalid-target, stale-revision, and invalidated-snapshot outcomes.
@@ -41,3 +41,10 @@ Review fixes corrected stopping coordinates, bounded job admission, and moved
 revision preparation outside publication locks so cancellation can prevent
 publication. Full-graph copying and global relationship indexing remain bounded
 performance limitations for ticket 14.
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `resolved`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).

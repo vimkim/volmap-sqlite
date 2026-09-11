@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Navigate B-tree topology and overflow claims
 
-**Status:** resolved
+**Status:** done
 
 - [x] The authoritative parser extracts supported schema records needed for object type, name, related table name, root page, and declaration from the physical schema B-tree.
 - [x] Tables and indexes with valid root pages are attributed only through validated root and descendant B-tree relationships.
@@ -69,3 +69,10 @@ Review totals: Standards 0 remaining; Spec 0.
 - `cargo clippy --locked --all-targets --all-features -- -D warnings`: passed.
 - `cargo fmt -- --check`: passed.
 - `npm --prefix frontend run typecheck`: passed; also included in the final build.
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `resolved`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).

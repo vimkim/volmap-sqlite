@@ -4,7 +4,7 @@
 
 **Blocked by:** 04: Navigate B-tree topology and overflow claims; 05: Navigate the freelist
 
-**Status:** resolved
+**Status:** done
 
 - [x] Auto-vacuum header evidence determines whether pointer-map pages are applicable, and their physical locations are derived with checked arithmetic.
 - [x] Supported pointer-map entries expose their entry kind, parent or owner claim where applicable, physical coordinates, and typed target identities.
@@ -37,3 +37,10 @@ Standards review against `053fb50`: addressed eager geometry enumeration, cancel
 Spec review against `053fb50`: addressed dependent-link containment, transitive overflow support, and map navigation; no remaining findings.
 
 Format reference: [SQLite database file format](https://www.sqlite.org/fileformat2.html).
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `resolved`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).

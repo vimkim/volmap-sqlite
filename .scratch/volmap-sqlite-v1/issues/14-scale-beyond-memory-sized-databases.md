@@ -223,3 +223,10 @@ hash and source SHA-256
 recomputing that hash from the current source files matches. The benchmark chain
 exited successfully. Unrelated local tickets and the project spec are excluded
 from the implementation commit.
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `done`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).

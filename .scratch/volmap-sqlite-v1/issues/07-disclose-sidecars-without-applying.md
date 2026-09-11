@@ -4,7 +4,7 @@
 
 **Blocked by:** 02: Publish coherent frozen inspection revisions
 
-**Status:** resolved
+**Status:** done
 
 - [x] Adjacent WAL, rollback-journal, and shared-memory candidates are discovered as part of the accepted database snapshot without exposing their absolute paths.
 - [x] Supported WAL header, frame, commit-boundary, checksum, and validation metadata is reported as sidecar evidence without overlaying any frame onto a main-file page.
@@ -40,3 +40,10 @@ Review baseline: `c9b0102`.
 - Spec: corrected the WAL reuse/generation-boundary finding; final recheck found no remaining concrete spec findings.
 
 References: [SQLite file formats](https://www.sqlite.org/fileformat2.html), [WAL-index format](https://www.sqlite.org/walformat.html), [hot-journal prerequisites](https://www.sqlite.org/lockingv3.html).
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `resolved`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).

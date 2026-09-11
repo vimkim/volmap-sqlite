@@ -4,7 +4,7 @@
 
 **Blocked by:** 07: Disclose sidecars without applying them; 09: Deep-inspect one selected cell into a new revision
 
-**Status:** ready-for-human
+**Status:** done
 
 - [x] The server binds only to loopback by default, and a non-loopback address is accepted only through an explicit operator option.
 - [x] Every non-loopback startup emits a prominent warning that the service has no built-in authentication or TLS and requires operator-controlled network protection.
@@ -67,3 +67,10 @@ Independent Spec review: zero missing requirements, scope-creep, or implementati
 findings. Historical revision reads follow ADR-0012; stale new deep requests are rejected.
 
 Review totals: Standards 0; Spec 0.
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `ready-for-human`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).

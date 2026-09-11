@@ -4,7 +4,7 @@
 
 **Blocked by:** 07: Disclose sidecars without applying them; 08: Follow schema attribution in schema flow
 
-**Status:** ready-for-human
+**Status:** done
 
 - [x] The optional helper runs only as a private subcommand of the same executable and is not exposed as a general SQL interface.
 - [x] The helper receives a private sidecar-free copy and executes only a fixed allowlisted set of read-only schema-metadata queries.
@@ -43,3 +43,10 @@ Review baseline: `5468846`. See README for the protocol and resource ceilings.
 - Production executable smoke check: optional enriched HTTP graph, embedded description label, no source-path or unselected-value disclosure, unchanged source bytes.
 - Standards review against `5468846`: no remaining findings after adding configurable operational budgets and shared named audit constants.
 - Spec review against `5468846`: no remaining findings after refusing incomplete direct schemas and zero-record budgets before helper launch. Regression tests first reproduced both failures.
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `ready-for-human`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).

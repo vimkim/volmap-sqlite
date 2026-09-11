@@ -4,7 +4,7 @@
 
 **Blocked by:** 06: Reconcile pointer-map, lock-byte, and page-role evidence; 09: Deep-inspect one selected cell into a new revision; 10: Enrich semantic metadata safely
 
-**Status:** resolved
+**Status:** done
 
 - [x] Operator configuration exposes effective ceilings for resident memory, concurrency, traversal depth, linked-chain length, processed cells, reconstructed payload bytes, decoded value bytes, request size, and response size.
 - [x] Fast scans, B-tree traversal, freelist and pointer-map traversal, overflow traversal, deep reconstruction, decoding, and helper execution check the applicable budgets at deterministic validation boundaries.
@@ -69,3 +69,10 @@ Review totals: Standards 0 unresolved; Spec 0 unresolved.
 
 Completed implementation and both independent review axes on 2026-09-10.
 The final full suite includes the reviewed fixes and HTTP coverage assertions.
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `resolved`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).

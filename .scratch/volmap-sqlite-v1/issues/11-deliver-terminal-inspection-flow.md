@@ -4,7 +4,7 @@
 
 **Blocked by:** 06: Reconcile pointer-map, lock-byte, and page-role evidence; 07: Disclose sidecars without applying them; 08: Follow schema attribution in schema flow; 09: Deep-inspect one selected cell into a new revision
 
-**Status:** ready-for-human
+**Status:** done
 
 - [x] The production executable can launch a Crossterm-based terminal inspection flow for the same frozen-input and inspection-session contract as the browser.
 - [x] Database-level entry points include schema objects, B-tree storage, freelist, pointer maps when applicable, and diagnostics.
@@ -36,3 +36,10 @@ tests passed. Formatting and diff whitespace checks passed.
 Standards and Spec reviews against `961992a` have no remaining findings after
 fixing configurable deep budgets, compact status/navigation, long evidence access,
 and missing header/freeblock/record-state facts.
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `ready-for-human`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).

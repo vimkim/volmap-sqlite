@@ -41,3 +41,10 @@ See [release verification](../../../release/VALIDATION.md),
 [guided examples](../../../examples/README.md). Dependency tickets 10–12 had stale
 `ready-for-human` labels but completed checklists and no pending implementation;
 their metadata, terminal, and web-security contracts passed the clean suite.
+
+
+## User acceptance — 2026-09-11
+
+The user tried the Inspector and explicitly accepted v1: “I think it's nice. I accept.”
+Previous tracker status: `done`. The existing implementation and validation record is retained above.
+Closed as part of the accepted v1 effort; see [the acceptance record](../../../release/ACCEPTANCE.md).
