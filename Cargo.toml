@@ -3,7 +3,7 @@ name = "volmap-sqlite"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "Read-only explorer of SQLite physical storage"
+description = "Read-only Inspector of frozen SQLite physical storage"
 
 [lib]
 name = "volmap_sqlite"
@@ -16,22 +16,22 @@ path = "src/main.rs"
 [dependencies]
 crossterm = "=0.29.0"
 unicode-width = "=0.2.2"
-axum = { version = "0.8.4", features = ["http1", "json", "tokio"] }
-clap = { version = "4.5.47", features = ["derive"] }
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.143"
-sha2 = "0.10.9"
-thiserror = "2.0.16"
-tokio = { version = "1.47.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-uuid = { version = "1.18.1", features = ["serde", "v4"] }
+axum = { version = "=0.8.9", features = ["http1", "json", "tokio"] }
+clap = { version = "=4.6.6", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+thiserror = "=2.0.20"
+tokio = { version = "=1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+uuid = { version = "=1.26.0", features = ["serde", "v4"] }
 
-rusqlite = { version = "0.37.0", features = ["blob", "bundled", "hooks", "limits", "modern_sqlite", "trace"] }
-tempfile = "3.21.0"
-rustix = { version = "1.1.4", features = ["process"] }
+rusqlite = { version = "=0.37.0", features = ["blob", "bundled", "hooks", "limits", "modern_sqlite", "trace"] }
+tempfile = "=3.27.0"
+rustix = { version = "=1.1.4", features = ["process"] }
 blake3 = "=1.8.7"
 
 [dev-dependencies]
-tower = { version = "0.5.2", features = ["util"] }
+tower = { version = "=0.5.3", features = ["util"] }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -43,3 +43,10 @@ pedantic = "warn"
 [[test]]
 name = "semantic_metadata"
 harness = false
+
+[build-dependencies]
+sha2 = "=0.10.9"
+
+[profile.release]
+strip = true
+codegen-units = 1

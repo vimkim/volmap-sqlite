@@ -634,3 +634,35 @@ it("finds a selected page's schema object outside the displayed object window", 
   expect(screen.getByText("CREATE TABLE table_069(value)")).toBeTruthy();
   cleanup(); vi.unstubAllGlobals();
 });
+
+it("retains selected deep results across a windowed revision refresh and hides historical values", async () => {
+  window.__VOLMAP_BOOTSTRAP__ = { snapshotId: "snapshot-fixture" };
+  let finished = false;
+  const target = { sessionId: "session-fixture", snapshotId: "snapshot-fixture", revision: 1, pageNumber: 1, cellIndex: 0 };
+  const coverage = { phase: "payload", reason: "complete", payloadBytes: "2", reconstructedBytes: "2", remainderBytes: "0", decodedValues: 1, expectedValues: 1, evidence: [], overflowPages: [], stoppingPage: null, stoppingPayloadOffset: null };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const revision = Number(url.match(/\/revisions\/(\d+)/)?.[1] ?? 1);
+    let result: unknown;
+    if (url.endsWith("/result")) result = { target, revision: 2, evidence: { cell: { pageNumber: 1, index: 0 }, coverage, fields: [], columnMetadata: "unavailable" }, values: [{ field: { ordinal: 0, serialType: "35", payloadOffset: "2", byteLength: "11", source: [], columnName: null }, value: { type: "text", value: "PRIVATE_ROW" } }] };
+    else if (url.includes("deep-inspections")) {
+      finished = true;
+      result = { id: "window-job", target, state: "completed", coverage, resultRevision: 2 };
+    } else if (url.endsWith("/metadata")) {
+      // A real window takes multiple requests; completion must survive the loading render.
+      await new Promise(resolve => setTimeout(resolve, 20));
+      result = { ...graph, summary: { snapshot: graph.snapshot, revision, coverage: graph.coverage, topologyCoverage: graph.topologyCoverage, pageCount: 3, claimCount: 0, relationshipCount: 0, traversalCount: 0, diagnosticCount: 0, schemaObjectCount: 0, freelistTrunkCount: 0, pointerMapPageCount: 0 } };
+    } else if (/\/pages\/\d+\/\d+$/.test(url)) result = { revision, firstPage: 1, total: 3, nextPage: null, pages: graph.pages };
+    else result = { ...published, sessionId: "session-fixture", revision: finished ? 2 : 1, availableRevisions: finished ? [1, 2] : [1], storage: { spilled: true, spilledIndexes: 1, cacheBytes: 1024, spillBytes: 32768, storedPages: 3 } };
+    return { ok: true, json: async () => result };
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "Select cell 1:0" }));
+  fireEvent.click(screen.getByRole("button", { name: "Deep-inspect selected cell" }));
+  expect(await screen.findByText("PRIVATE_ROW")).toBeTruthy();
+  await waitFor(() => expect(screen.getByRole("option", { name: "Revision 2" })).toBeTruthy());
+  fireEvent.change(screen.getByRole("combobox", { name: "Inspection revision" }), { target: { value: "1" } });
+  expect(screen.queryByText("PRIVATE_ROW")).toBeNull();
+  await waitFor(() => expect(screen.getByRole("button", { name: "Deep-inspect selected cell" })).toBeTruthy());
+  expect(screen.queryByText("PRIVATE_ROW")).toBeNull();
+  cleanup(); vi.unstubAllGlobals();
+});

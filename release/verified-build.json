@@ -1,0 +1,40 @@
+{
+  "assets": {
+    "assets/app.css": "f2f9a2bd8f47fd7d325edb005d626e08f83b140de2dee3ca4a9494e7696eb5c1",
+    "assets/app.js": "35c377daa1fe70699a93f3ea0a62b7d6dd1b39aee1bfb0fcc4ffbe094e4a3571",
+    "index.html": "a047197b9a2f936558d73d97ac513f4365368dd0da58995657e42992d558453f"
+  },
+  "sha256": "ee311a34fa99422e48c03b78ab63a5a5d3208941c7b60927aa0d04afe2faa02c",
+  "target": "x86_64-unknown-linux-gnu",
+  "tools": {
+    "ar": {
+      "sha256": "e34a7d29e745a095537e4498bf65d820ff009f84971c662ffbc8bfdc59608830",
+      "version": "GNU ar version 2.35.2-63.el9"
+    },
+    "cc": {
+      "sha256": "472ed0bac12ba95f15d484b506ff1b32cc089cc47f5253a7ff0697667501f322",
+      "version": "gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)"
+    },
+    "ld": {
+      "sha256": "f1f6fbe21153b9281aaf1042540cf23f744a64a866d03fae0cccdcd43f23053b",
+      "version": "GNU ld version 2.35.2-63.el9"
+    },
+    "libc": {
+      "sha256": "2e332feed7fe0d65afca81d83d07f997917c07d5c1f1fd5564e98330e78aa0b5",
+      "version": "ldd (GNU libc) 2.34"
+    },
+    "node": {
+      "sha256": "eb73c3770c1220c8eaad3212f5644b695a0e05877c3d15fa6cc0e76b07f656a7",
+      "version": "v25.8.0"
+    },
+    "npm": {
+      "sha256": "dd1a485ca794a497c40af1eeaffbe22c7b1f147eb711d2ba3e416b6e94f3b448",
+      "version": "11.11.0"
+    },
+    "rustc": {
+      "sha256": "d3a664c970a9fd8361b64194861bebc1ae37b9054e5ee3400dc1c9e691797eea",
+      "version": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+    }
+  },
+  "version": "volmap-sqlite 0.1.0\nbuild 75c909d6727ee60287510d2d3ca735b7cf939ccf66010350a69c6ff38fb987fa\nrustc 1.97.1 (8bab26f4f 2026-07-14)\ntarget x86_64-unknown-linux-gnu"
+}

@@ -109,7 +109,7 @@ const encodingLabel: Record<TextEncoding, string> = {
   utf16_be: "UTF-16 BE",
 };
 
-export function Atlas({ graph, status, viewRevision, onRevision, navigation }: { graph: InspectionGraph; status: SessionStatus; viewRevision: number | null; onRevision: (revision: number | null) => void; navigation?: WindowNavigation }) {
+export function Atlas({ graph, status, viewRevision, onRevision, navigation, loadingRevision = false }: { loadingRevision?: boolean; graph: InspectionGraph; status: SessionStatus; viewRevision: number | null; onRevision: (revision: number | null) => void; navigation?: WindowNavigation }) {
   const { geometry, source } = graph.snapshot;
   const [workspace, setWorkspace] = useState<"atlas" | "schema">("atlas");
   const [localSelection, setSelection] = useState<EntitySelector>({ type: "page", pageNumber: 1 });
@@ -336,7 +336,7 @@ export function Atlas({ graph, status, viewRevision, onRevision, navigation }: {
         onSelectPage={selectPage}
         evidenceByte={evidenceLocus?.page.pageNumber === active.number ? evidenceLocus.range.pageOffset : null}
       />}
-      {active && selection.type === "cell" && <DeepCell limits={status.deepLimits?.perJob} key={`${graph.snapshot.id}:${selection.pageNumber}:${selection.cellIndex}`}
+      {active && selection.type === "cell" && <DeepCell withheld={loadingRevision} limits={status.deepLimits?.perJob} key={`${graph.snapshot.id}:${selection.pageNumber}:${selection.cellIndex}`}
         target={{ sessionId: status.sessionId, snapshotId: graph.snapshot.id, revision: graph.revision, pageNumber: selection.pageNumber, cellIndex: selection.cellIndex }}
         currentRevision={status.revision} onPublished={onRevision} /> }
     </main>

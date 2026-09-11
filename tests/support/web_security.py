@@ -258,7 +258,7 @@ with tempfile.TemporaryDirectory() as directory:
     if browser:
         netlog = pathlib.Path(directory) / "browser-netlog.json"
         with server(database, "--listen", "127.0.0.1:0") as (port, entry, _):
-            result = subprocess.run([browser, "--no-sandbox", "--disable-gpu", "--disable-background-networking", "--disable-component-update", "--no-first-run", "--dump-dom", "--virtual-time-budget=3000", f"--log-net-log={netlog}", f"http://127.0.0.1:{port}{entry}"], capture_output=True, timeout=15)
+            result = subprocess.run([browser, "--headless", "--no-sandbox", "--disable-gpu", "--disable-background-networking", "--disable-component-update", "--no-first-run", "--dump-dom", "--virtual-time-budget=3000", f"--log-net-log={netlog}", f"http://127.0.0.1:{port}{entry}"], capture_output=True, timeout=15)
             assert result.returncode == 0, result.stderr
             assert b'data-page-number="2"' in result.stdout, (result.stdout, result.stderr)
             assert b"private-value-marker" not in result.stdout

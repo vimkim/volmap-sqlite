@@ -1,12 +1,37 @@
 # Volmap SQLite Inspector
 
-Read-only inspection of a frozen SQLite main-file image. The current implementation
-publishes geometry, page inventory, and local table/index B-tree structural evidence.
-Select a page for its byte map, header, cell-pointer inventory, cell extents, record
-serial types, rowids, and supported freeblock/fragment layout. Application values
-and raw payload bytes are never included in these responses.
+Read-only inspection of a **frozen SQLite main-file image**, with a browser page
+atlas, schema flow, and focused terminal interface. Physical evidence covers B-tree
+cells, overflow, freelists, pointer maps, and schema attribution. Explicit deep
+inspection decodes one selected cell; broad navigation never discloses application
+values or raw payload bytes.
 
-Build the embedded browser assets, then run the standalone binary:
+The main-file image can differ from SQLite's logical database image when WAL or
+rollback-journal files exist. The Inspector reports those sidecars but never applies
+them. Use a stopped database or a stable copy of the main file and adjacent sidecars.
+Change detection does not make a live input safe. **v1 neither repairs nor recovers
+databases**, and provides no SQL console.
+
+Run the single release executable (Linux x86-64, glibc 2.34 or newer):
+
+```sh
+./volmap-sqlite --version
+./volmap-sqlite /path/to/frozen.sqlite
+./volmap-sqlite /path/to/frozen.sqlite --terminal
+```
+
+The printed URL opens the embedded browser interface. No Node.js, separate web
+server, SQLite command-line tool, or separately installed SQLite library is needed
+at runtime. A browser is needed for the web interface; a terminal is sufficient for
+`--terminal`. See [release builds and verification](release/README.md) for pinned
+build prerequisites, clean-build verification, and artifact checksums.
+
+To try guided examples from this checkout, run `just example web` or
+`just example terminal`. The [example guide](examples/README.md) covers catalog,
+WAL, and damaged inputs; `just user web '/path/to/frozen.sqlite'` opens your own file.
+Run `just` to list the `user` and `example` modules.
+
+For development, build the embedded assets before compiling the executable:
 
 ```sh
 npm --prefix frontend ci
@@ -30,7 +55,7 @@ work are refused, while observed facts remain available as diagnostic evidence.
 
 The session fingerprints the main file and adjacent `-wal`, `-journal`, and `-shm`
 set. It compares device/inode, size, modification/change timestamps and file mode.
-Streaming SHA-256 fingerprints also detect content differences when filesystem
+Streaming BLAKE3 fingerprints also detect content differences when filesystem
 timestamps have insufficient resolution. Hashes stay private and use a fixed 16 KiB
 read buffer. Acceptance, publication and revision retrieval verify input contents;
 lightweight status queries compare metadata. Content verification reads at most the
@@ -50,7 +75,7 @@ The browser API separates session status from immutable revisions:
 
 Page inventory coverage reports evaluated pages, trusted total when known, the next
 uninspected page, remaining pages, and the completion or stop reason. A complete page
-inventory does not imply that the full structural inspection has been implemented.
+inventory does not imply complete topology, allocation, schema, or deep coverage.
 
 Each page carries separate local B-tree coverage (`complete`, `partial`, or
 `unsupported`). Header recognition is a local role claim, not global role attribution.
@@ -68,8 +93,8 @@ overflow, cycles, overlapping claim sources, broken overflow links, and incompat
 overflow ownership stop only the affected traversal. The browser follows validated
 links in either direction and jumps from relationship diagnostics to their evidence
 page and byte. Overflow traversal reads only the four-byte linkage fields and never
-adds overflow payload bytes to the broad graph. Global page-role reconciliation remains
-later work.
+adds overflow payload bytes to the broad graph. Global role reconciliation preserves
+conflicting claims and distinguishes referenced pages from orphan candidates.
 
 Freelist inspection starts at the header's first-trunk pointer and declared page
 count. The graph records bounded trunk headers, declared leaf pointers, distinct
@@ -325,8 +350,8 @@ Operators may lower the defaults with `--max-web-response-bytes` (minimum 1024),
 These are admission ceilings, not database-corruption findings or performance
 promises. HTTP 507 reports a `budget_stopped` response with a byte/collection reason;
 413, 414, 431, 408, and 429 distinguish body, URI, header, body-timeout, and
-concurrency limits. Oversized graphs are refused rather than sampled; pagination
-and larger-scale projections belong to subsequent work. Lowering limits can also
+concurrency limits. Oversized whole-graph exports are refused rather than sampled; normal navigation
+uses bounded page and collection windows. Lowering limits can also
 withhold status, assets, and selected results; a completed deep job still leaves
 its immutable revision intact even if its result exceeds the web response limit.
 

@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';
+import { chromium } from '../frontend/node_modules/playwright-core/index.mjs';
+const [url, executablePath] = process.argv.slice(2);
+assert(url && executablePath, 'browser.mjs URL CHROMIUM');
+const browser = await chromium.launch({ executablePath, headless: true, args: ['--no-sandbox', '--disable-background-networking'] });
+try {
+  const page = await browser.newPage();
+  const errors = [];
+  const requests = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('request', request => requests.push(request.url()));
+  await page.goto(url);
+  await page.locator('[data-page-number="2"]').waitFor();
+  assert(!(await page.locator('body').innerText()).includes('PRIVATE_ROW'));
+  await page.getByRole('button', { name: 'Schema flow', exact: true }).click();
+  await page.getByRole('button', { name: 'Inspect schema table items', exact: true }).click();
+  await page.getByRole('region', { name: 'Schema storage flow' }).waitFor();
+  await page.getByRole('button', { name: 'Page atlas', exact: true }).click();
+  await page.locator('[data-page-number="2"]').click();
+  await page.getByRole('button', { name: /cell.*0/i }).first().click();
+  await page.getByRole('button', { name: 'Deep-inspect selected cell', exact: true }).click();
+  const values = page.getByRole('region', { name: 'Selected stored values' });
+  await values.waitFor({ timeout: 10000 });
+  assert((await values.innerText()).includes('PRIVATE_ROW'));
+  const text = await page.locator('body').innerText();
+  assert(!text.includes('OTHER_ROW'));
+  assert(!text.includes('RAW_HIDE'));
+  assert.deepEqual(errors, []);
+  assert(requests.every(request => new URL(request).origin === new URL(url).origin));
+  console.log('Browser: physical/semantic navigation, selected deep value, CSP and same-origin traffic passed');
+} finally { await browser.close(); }

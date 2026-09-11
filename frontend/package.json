@@ -18,8 +18,14 @@
     "@types/react-dom": "19.2.7",
     "@vitejs/plugin-react": "6.1.1",
     "jsdom": "29.0.1",
+    "playwright-core": "1.63.0",
     "typescript": "7.0.2",
     "vite": "8.2.2",
     "vitest": "4.1.11"
-  }
+  },
+  "engines": {
+    "node": "25.8.0",
+    "npm": "11.11.0"
+  },
+  "packageManager": "npm@11.11.0"
 }

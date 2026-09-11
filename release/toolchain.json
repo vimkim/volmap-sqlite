@@ -1,0 +1,10 @@
+{
+  "target": "x86_64-unknown-linux-gnu",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "node": "v25.8.0",
+  "npm": "11.11.0",
+  "cc": "gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)",
+  "ld": "GNU ld version 2.35.2-63.el9",
+  "ar": "GNU ar version 2.35.2-63.el9",
+  "libc": "ldd (GNU libc) 2.34"
+}

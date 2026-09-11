@@ -13,7 +13,7 @@ use volmap_sqlite::inspection::{
 use volmap_sqlite::web::{WebLimits, atlas_router_for_listener, bounded_listener};
 
 #[derive(Debug, Parser)]
-#[command(name = "volmap-sqlite", about = "Inspect a frozen SQLite main file")]
+#[command(name = "volmap-sqlite", about = "Inspect a frozen SQLite main file", version = concat!(env!("CARGO_PKG_VERSION"), "\nbuild ", env!("VOLMAP_BUILD_ID"), "\n", env!("VOLMAP_RUSTC"), "\ntarget ", env!("VOLMAP_TARGET")))]
 struct Arguments {
     /// Maximum resident process bytes; inspection stops before allocation boundaries.
     #[arg(long, default_value_t = 256 * 1024 * 1024)]

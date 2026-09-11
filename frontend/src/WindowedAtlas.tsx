@@ -155,7 +155,7 @@ export function WindowedAtlas({ status, revision, viewRevision, onRevision }: { 
   const sizeControl = <label>Records per window <select aria-label="Records per window" value={size} onChange={event => {
     setSize(Number(event.target.value)); setOffsets(initialOffsets); setAttributionOffset(0);
   }}>{[1, 8, 16, 32].map(count => <option key={count} value={count}>{count}</option>)}</select></label>;
-  if (!view || view.graph.revision !== revision) return <main className="message"><h1>{error ? "Evidence window unavailable" : "Loading revision evidence…"}</h1>{error && <><p>{error}</p>{sizeControl}<button type="button" onClick={() => setRetry(prior => prior + 1)}>Retry evidence window</button></>}</main>;
+  if (!view) return <main className="message"><h1>{error ? "Evidence window unavailable" : "Loading revision evidence…"}</h1>{error && <><p>{error}</p>{sizeControl}<button type="button" onClick={() => setRetry(prior => prior + 1)}>Retry evidence window</button></>}</main>;
   const controls = <section aria-label="Evidence windows">
     <h2>Browse complete collections</h2>
     {sizeControl}
@@ -175,5 +175,7 @@ export function WindowedAtlas({ status, revision, viewRevision, onRevision }: { 
     {traversal && <TraversalWindow key={`${revision}:${traversal.traversalOffset}:${size}`} base={`/api/snapshots/${encodeURIComponent(status.snapshotId)}/revisions/${revision}`} header={traversal} size={size} onSelect={pageNumber => select({ type: "page", pageNumber })} />}
     {status.storage && <p>Retained cache: {status.storage.cacheBytes.toLocaleString()} B · Private spill: {status.storage.spillBytes.toLocaleString()} B · Spilled indexes: {status.storage.spilledIndexes}</p>}
   </section>;
-  return <Atlas graph={view.graph} status={status} viewRevision={viewRevision} onRevision={onRevision} navigation={{ selectedSchema: view.selectedSchema, selection: page === view.selectedPage ? selection : { type: "page", pageNumber: view.selectedPage }, attribution: view.batches.schema_attribution.items.map(item => ({ ...item.object, pages: [{ pageNumber: view.selectedPage }] })), gridPages: new Set(view.pages.pages.map(page => page.number)), controls, onSelect: select }} />;
+  const loadingRevision = view.graph.revision !== revision;
+  return <>{loadingRevision && <main className="message"><h1>Loading revision evidence…</h1></main>}
+    <div hidden={loadingRevision}><Atlas loadingRevision={loadingRevision} graph={view.graph} status={status} viewRevision={viewRevision} onRevision={onRevision} navigation={{ selectedSchema: view.selectedSchema, selection: page === view.selectedPage ? selection : { type: "page", pageNumber: view.selectedPage }, attribution: view.batches.schema_attribution.items.map(item => ({ ...item.object, pages: [{ pageNumber: view.selectedPage }] })), gridPages: new Set(view.pages.pages.map(page => page.number)), controls, onSelect: select }} /></div></>;
 }

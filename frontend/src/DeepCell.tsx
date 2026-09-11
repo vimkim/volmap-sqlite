@@ -24,7 +24,7 @@ function sameTarget(a: Target, b: Target) {
   return a.sessionId === b.sessionId && a.snapshotId === b.snapshotId && a.revision === b.revision && a.pageNumber === b.pageNumber && a.cellIndex === b.cellIndex;
 }
 
-export function DeepCell({ target, currentRevision, onPublished, limits }: { limits?: Budget; target: Target; currentRevision: number | null; onPublished: (revision: number) => void }) {
+export function DeepCell({ target, currentRevision, onPublished, limits, withheld = false }: { withheld?: boolean; limits?: Budget; target: Target; currentRevision: number | null; onPublished: (revision: number) => void }) {
   const [budget, setBudget] = useState(limits ?? defaults);
   const [request, setRequest] = useState<{ target: Target; budget: Budget } | null>(null);
   const [job, setJob] = useState<Job | null>(null);
@@ -63,7 +63,7 @@ export function DeepCell({ target, currentRevision, onPublished, limits }: { lim
   }, [request, base, onPublished]);
   const pending = request !== null && (job === null || job.state === "pending") && error === null;
   const validBudget = Object.entries(budget).every(([key, value]) => Number.isSafeInteger(value) && value >= 0 && (!limits || value <= limits[key as keyof Budget]) && (key === "maxPayloadBytes" || key === "maxDecodedBytes" || value <= 4294967295));
-  const visible = result?.revision === target.revision && result.target.pageNumber === target.pageNumber && result.target.cellIndex === target.cellIndex;
+  const visible = !withheld && result?.revision === target.revision && result.target.pageNumber === target.pageNumber && result.target.cellIndex === target.cellIndex;
   return <section className="deep-cell" aria-label="Selected-cell deep inspection">
     <h2>Deep inspection · cell:{target.pageNumber}:{target.cellIndex}</h2>
     <p>Decode this cell's stored values. BLOBs show their type and length. A successful inspection publishes a new immutable revision.</p>
@@ -72,7 +72,7 @@ export function DeepCell({ target, currentRevision, onPublished, limits }: { lim
         onChange={event => setBudget(previous => ({ ...previous, [key]: Number(event.target.value) }))} />
     </label>)}</details>
     {target.revision !== currentRevision && <p>Viewing a historical revision. Choose the latest revision before starting new work.</p>}
-    <button type="button" disabled={pending || !validBudget || target.revision !== currentRevision} onClick={() => {
+    <button type="button" disabled={withheld || pending || !validBudget || target.revision !== currentRevision} onClick={() => {
       setJob(null); setResult(null); setError(null); setCancelling(false); setRequest({ target: { ...target }, budget: { ...budget } });
     }}>Deep-inspect selected cell</button>
     {pending && job && <button type="button" disabled={cancelling} onClick={() => {
