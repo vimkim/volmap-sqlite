@@ -76,7 +76,7 @@ disclosure, request limits, and absence of outbound server connections. The real
 browser checks successful CSP boot, same-origin requests, and exclusion of
 unselected row values and BLOB contents. The separate damage/fuzz and large-file
 benchmarks provide deeper topology coverage; see [fuzzing](../fuzz/README.md) and
-[large-file measurements](../README.md#large-file-inspection-and-private-storage).
+[large-file measurements](../docs/usage.md#large-file-inspection-and-private-storage).
 A sparse 2 GiB release smoke is not a promise that all dense 2 GiB inputs fit.
 
 To rerun only packaged behavior after a local change:
@@ -95,5 +95,5 @@ private helper. There is no development prototype selector or built-in demo data
 
 WAL and rollback-journal bytes are reported, never applied. The main-file image is
 therefore not necessarily SQLite's logical database image. v1 does not repair or
-recover databases. Consult the main [usage guide](../README.md) for operational
+recover databases. Consult the detailed [usage guide](../docs/usage.md) for operational
 budgets, disclosure boundaries, and explicit remote-serving options.
