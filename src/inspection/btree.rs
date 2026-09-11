@@ -146,6 +146,16 @@ pub enum Kind {
 }
 
 impl Kind {
+    fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            13 => Some(Self::TableLeaf),
+            5 => Some(Self::TableInterior),
+            10 => Some(Self::IndexLeaf),
+            2 => Some(Self::IndexInterior),
+            _ => None,
+        }
+    }
+
     fn interior(self) -> bool {
         matches!(self, Self::TableInterior | Self::IndexInterior)
     }
@@ -188,12 +198,11 @@ impl Page<'_> {
         detail
             .regions
             .push(self.region("opaque_reserved", self.usable, self.bytes.len()));
-        let kind = match self.bytes[base] {
-            13 => Kind::TableLeaf,
-            5 => Kind::TableInterior,
-            10 => Kind::IndexLeaf,
-            2 => Kind::IndexInterior,
-            _ => return detail,
+        let Some(kind) = Kind::from_byte(self.bytes[base]) else {
+            detail
+                .regions
+                .push(self.region("opaque_content", base, self.usable));
+            return detail;
         };
         if self.number == 1 && matches!(kind, Kind::IndexLeaf | Kind::IndexInterior) {
             detail

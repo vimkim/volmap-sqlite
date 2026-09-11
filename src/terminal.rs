@@ -435,9 +435,7 @@ impl TerminalFlow {
                 evidence.extend(self.ranges.iter().map(window::Range::label));
             }
         }
-        if let Some(diagnostic) = &status.diagnostic {
-            evidence.push(format!("{}: {}", diagnostic.code, diagnostic.message));
-        }
+        evidence.extend(input_diagnostic_lines(status));
         if matches!(self.focus(), Focus::Database | Focus::Help) {
             evidence.extend(evidence::budget_lines(status));
             evidence.push(format!(
@@ -616,4 +614,18 @@ fn safe_window(text: &str, width: usize, offset: usize) -> String {
         }
     }
     result
+}
+
+fn input_diagnostic_lines(status: &crate::inspection::SessionStatus) -> Vec<String> {
+    let Some(diagnostic) = &status.diagnostic else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!("{}: {}", diagnostic.code, diagnostic.message)];
+    if let Some(range) = &diagnostic.opaque_range {
+        lines.push(format!(
+            "Opaque input: offset {}; length {} bytes",
+            range.file_offset, range.length
+        ));
+    }
+    lines
 }

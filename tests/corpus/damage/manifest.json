@@ -1,0 +1,1209 @@
+[
+  {
+    "name": "truncated-header",
+    "file": "truncated-header.sqlite",
+    "boundary": "database geometry",
+    "fatal": true,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/status/diagnostic/code",
+        "equals": "fatal_geometry"
+      },
+      {
+        "path": "/status/diagnostic/message",
+        "equals": "the database header is incomplete"
+      },
+      {
+        "path": "/status/coverage/evaluated",
+        "equals": 0
+      },
+      {
+        "path": "/status/coverage/total",
+        "equals": null
+      }
+    ]
+  },
+  {
+    "name": "truncated-first-page",
+    "file": "truncated-first-page.sqlite",
+    "boundary": "database geometry",
+    "fatal": true,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/status/diagnostic/code",
+        "equals": "fatal_geometry"
+      },
+      {
+        "path": "/status/diagnostic/message",
+        "equals": "the database does not contain one complete page"
+      },
+      {
+        "path": "/status/coverage/evaluated",
+        "equals": 0
+      },
+      {
+        "path": "/status/coverage/total",
+        "equals": null
+      }
+    ]
+  },
+  {
+    "name": "truncated-tail",
+    "file": "truncated-tail.sqlite",
+    "boundary": "database geometry",
+    "fatal": true,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/status/diagnostic/code",
+        "equals": "fatal_geometry"
+      },
+      {
+        "path": "/status/diagnostic/message",
+        "equals": "the database ends with an incomplete page"
+      },
+      {
+        "path": "/status/coverage/evaluated",
+        "equals": 0
+      },
+      {
+        "path": "/status/coverage/total",
+        "equals": null
+      }
+    ]
+  },
+  {
+    "name": "contradictory-count",
+    "file": "contradictory-count.sqlite",
+    "boundary": "database geometry",
+    "fatal": true,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/status/diagnostic/code",
+        "equals": "fatal_geometry"
+      },
+      {
+        "path": "/status/coverage/total",
+        "equals": null
+      },
+      {
+        "path": "/status/diagnostic/message",
+        "equals": "the valid database header declares 9 pages, but the file contains 2"
+      }
+    ]
+  },
+  {
+    "name": "impossible-page-size",
+    "file": "impossible-page-size.sqlite",
+    "boundary": "database geometry",
+    "fatal": true,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/status/diagnostic/code",
+        "equals": "fatal_geometry"
+      },
+      {
+        "path": "/status/coverage/total",
+        "equals": null
+      }
+    ]
+  },
+  {
+    "name": "malformed-varint",
+    "file": "malformed-varint.sqlite",
+    "boundary": "cell pointer / extent / record; sibling preserved",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 1,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "partial"
+          }
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells",
+        "contains": {
+          "identity": {
+            "pageNumber": 2,
+            "index": 1
+          },
+          "diagnostic": "truncated_varint"
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells",
+        "contains": {
+          "identity": {
+            "pageNumber": 2,
+            "index": 0
+          },
+          "record": {
+            "state": "complete"
+          },
+          "range": {
+            "length": 4
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "impossible-cell-extent",
+    "file": "impossible-cell-extent.sqlite",
+    "boundary": "cell pointer / extent / record; sibling preserved",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 1,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "partial"
+          }
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells",
+        "contains": {
+          "identity": {
+            "pageNumber": 2,
+            "index": 1
+          },
+          "diagnostic": "invalid_cell_extent"
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells",
+        "contains": {
+          "identity": {
+            "pageNumber": 2,
+            "index": 0
+          },
+          "record": {
+            "state": "complete"
+          },
+          "range": {
+            "length": 4
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "out-of-range-cell",
+    "file": "out-of-range-cell.sqlite",
+    "boundary": "cell pointer / extent / record; sibling preserved",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 1,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "partial"
+          }
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells",
+        "contains": {
+          "identity": {
+            "pageNumber": 2,
+            "index": 0
+          },
+          "diagnostic": "invalid_cell_pointer"
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells",
+        "contains": {
+          "identity": {
+            "pageNumber": 2,
+            "index": 1
+          },
+          "record": {
+            "state": "complete"
+          },
+          "range": {
+            "length": 4
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "unsupported-serial",
+    "file": "unsupported-serial.sqlite",
+    "boundary": "cell pointer / extent / record; sibling preserved",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 1,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "partial"
+          }
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells",
+        "contains": {
+          "identity": {
+            "pageNumber": 2,
+            "index": 1
+          },
+          "diagnostic": "invalid_record"
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells",
+        "contains": {
+          "identity": {
+            "pageNumber": 2,
+            "index": 0
+          },
+          "record": {
+            "state": "complete"
+          },
+          "range": {
+            "length": 4
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "impossible-record-header",
+    "file": "impossible-record-header.sqlite",
+    "boundary": "cell pointer / extent / record; sibling preserved",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 1,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "partial"
+          }
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells",
+        "contains": {
+          "identity": {
+            "pageNumber": 2,
+            "index": 1
+          },
+          "diagnostic": "invalid_record"
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells",
+        "contains": {
+          "identity": {
+            "pageNumber": 2,
+            "index": 0
+          },
+          "record": {
+            "state": "complete"
+          },
+          "range": {
+            "length": 4
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "overlapping-cells",
+    "file": "overlapping-cells.sqlite",
+    "boundary": "overlap component; dependent values withheld",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 1,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "partial"
+          }
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells/0/diagnostic",
+        "equals": "overlapping_allocation"
+      },
+      {
+        "path": "/pages/1/detail/cells/1/diagnostic",
+        "equals": "overlapping_allocation"
+      },
+      {
+        "path": "/pages/1/detail/cells/0/record",
+        "equals": null
+      },
+      {
+        "path": "/pages/1/detail/cells/1/range",
+        "equals": null
+      },
+      {
+        "path": "/pages/1/detail/cells/0/pointer",
+        "equals": {
+          "pageOffset": 8,
+          "fileOffset": 520,
+          "length": 2
+        }
+      }
+    ]
+  },
+  {
+    "name": "broken-freeblock",
+    "file": "broken-freeblock.sqlite",
+    "boundary": "freeblock extent; cells preserved",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "partial"
+          }
+        }
+      },
+      {
+        "path": "/pages/1/detail/diagnostics",
+        "contains": "invalid_freeblock_extent"
+      },
+      {
+        "path": "/pages/1/detail/cells/0/record/state",
+        "equals": "complete"
+      },
+      {
+        "path": "/pages/1/detail/freeblocks",
+        "equals": []
+      }
+    ]
+  },
+  {
+    "name": "out-of-range-link",
+    "file": "out-of-range-link.sqlite",
+    "boundary": "child link; independent right branch preserved",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/relationshipClaims",
+        "contains": {
+          "id": "btree:page:1:cell:0",
+          "state": "unresolved",
+          "target": {
+            "pageNumber": 9
+          },
+          "evidence": {
+            "range": {
+              "pageOffset": 507,
+              "fileOffset": 507,
+              "length": 4
+            }
+          }
+        }
+      },
+      {
+        "path": "/traversals",
+        "contains": {
+          "kind": "btree",
+          "validatedPrefix": [
+            {
+              "pageNumber": 1
+            }
+          ],
+          "stop": {
+            "reason": "out_of_range",
+            "intendedTarget": {
+              "pageNumber": 9
+            }
+          }
+        }
+      },
+      {
+        "path": "/traversals",
+        "contains": {
+          "kind": "btree",
+          "validatedPrefix": [
+            {
+              "pageNumber": 1
+            },
+            {
+              "pageNumber": 3
+            }
+          ],
+          "stop": null
+        }
+      },
+      {
+        "path": "/diagnostics",
+        "contains": {
+          "code": "btree_child_out_of_range",
+          "containment": "traversal_stopped"
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 3,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "duplicate-claims",
+    "file": "duplicate-claims.sqlite",
+    "boundary": "conflicting inbound claims; no relationship authorized",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/relationshipClaims",
+        "contains": {
+          "id": "btree:page:1:cell:0",
+          "state": "conflicting"
+        }
+      },
+      {
+        "path": "/relationshipClaims",
+        "contains": {
+          "id": "btree:page:1:rightmost",
+          "state": "conflicting"
+        }
+      },
+      {
+        "path": "/relationships",
+        "equals": []
+      },
+      {
+        "path": "/diagnostics",
+        "contains": {
+          "code": "btree_duplicate_parent",
+          "containment": "relationship_excluded"
+        }
+      },
+      {
+        "path": "/traversals",
+        "contains": {
+          "validatedPrefix": [
+            {
+              "pageNumber": 1
+            }
+          ],
+          "stop": {
+            "reason": "conflicting_claim"
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "impossible-freelist-count",
+    "file": "impossible-freelist-count.sqlite",
+    "boundary": "trunk count; no leaf decoding",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/freelist/coverage/reason",
+        "equals": "invalid_structure"
+      },
+      {
+        "path": "/freelist/coverage/remainder",
+        "equals": null
+      },
+      {
+        "path": "/traversals",
+        "contains": {
+          "kind": "freelist",
+          "validatedPrefix": [
+            {
+              "pageNumber": 2
+            }
+          ],
+          "stop": {
+            "reason": "invalid_reference"
+          }
+        }
+      },
+      {
+        "path": "/diagnostics",
+        "contains": {
+          "code": "freelist_leaf_count_exceeds_capacity",
+          "containment": "traversal_stopped"
+        }
+      },
+      {
+        "path": "/freelist/declaredCount/evidence/range",
+        "equals": {
+          "pageOffset": 36,
+          "fileOffset": 36,
+          "length": 4
+        }
+      }
+    ]
+  },
+  {
+    "name": "freelist-cycle",
+    "file": "freelist-cycle.sqlite",
+    "boundary": "trunk back-link; prefix retained",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/freelist/coverage/reason",
+        "equals": "invalid_structure"
+      },
+      {
+        "path": "/traversals",
+        "contains": {
+          "kind": "freelist",
+          "validatedPrefix": [
+            {
+              "pageNumber": 2
+            },
+            {
+              "pageNumber": 4
+            }
+          ],
+          "stop": {
+            "reason": "cycle",
+            "intendedTarget": {
+              "pageNumber": 2
+            }
+          }
+        }
+      },
+      {
+        "path": "/diagnostics",
+        "contains": {
+          "code": "freelist_trunk_cycle",
+          "containment": "traversal_stopped"
+        }
+      },
+      {
+        "path": "/freelist/coverage/evaluatedPages",
+        "equals": 4
+      }
+    ]
+  },
+  {
+    "name": "encrypted-looking",
+    "file": "encrypted-looking.sqlite",
+    "boundary": "unsupported main-file format; geometry unknown",
+    "fatal": true,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/status/diagnostic/code",
+        "equals": "unsupported_format"
+      },
+      {
+        "path": "/status/diagnostic/opaqueRange",
+        "equals": {
+          "fileOffset": "0",
+          "length": "512"
+        }
+      },
+      {
+        "path": "/status/coverage/total",
+        "equals": null
+      }
+    ]
+  },
+  {
+    "name": "compressed",
+    "file": "compressed.sqlite",
+    "boundary": "unsupported main-file format; geometry unknown",
+    "fatal": true,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/status/diagnostic/code",
+        "equals": "unsupported_format"
+      },
+      {
+        "path": "/status/diagnostic/opaqueRange",
+        "equals": {
+          "fileOffset": "0",
+          "length": "512"
+        }
+      },
+      {
+        "path": "/status/coverage/total",
+        "equals": null
+      }
+    ]
+  },
+  {
+    "name": "custom-vfs",
+    "file": "custom-vfs.sqlite",
+    "boundary": "unsupported main-file format; geometry unknown",
+    "fatal": true,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/status/diagnostic/code",
+        "equals": "unsupported_format"
+      },
+      {
+        "path": "/status/diagnostic/opaqueRange",
+        "equals": {
+          "fileOffset": "0",
+          "length": "512"
+        }
+      },
+      {
+        "path": "/status/coverage/total",
+        "equals": null
+      }
+    ]
+  },
+  {
+    "name": "opaque-page",
+    "file": "opaque-page.sqlite",
+    "boundary": "unsupported page; valid geometry retained",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "unsupported",
+            "diagnostics": [],
+            "cells": []
+          }
+        }
+      },
+      {
+        "path": "/pages/1/detail/regions",
+        "contains": {
+          "kind": "opaque_content",
+          "range": {
+            "pageOffset": 0,
+            "fileOffset": 512,
+            "length": 512
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 1,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "reserved-content",
+    "file": "reserved-content.sqlite",
+    "boundary": "reserved extent; no extension decoding",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 1,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages/1/detail/regions",
+        "contains": {
+          "kind": "opaque_reserved",
+          "range": {
+            "pageOffset": 504,
+            "fileOffset": 1016,
+            "length": 8
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "malformed-sidecars",
+    "file": "malformed-sidecars.sqlite",
+    "boundary": "sidecar header; main file unchanged",
+    "fatal": false,
+    "sidecars": {
+      "wal": "malformed-sidecars.wal",
+      "journal": "malformed-sidecars.journal",
+      "shm": "malformed-sidecars.shm"
+    },
+    "checks": [
+      {
+        "path": "/sidecars",
+        "contains": {
+          "kind": "wal",
+          "state": "malformed",
+          "consequence": "wal_not_applied",
+          "coverage": {
+            "reason": "validation_stop"
+          },
+          "diagnostics": [
+            {
+              "code": "wal_header_truncated",
+              "offset": "0",
+              "length": "8"
+            }
+          ]
+        }
+      },
+      {
+        "path": "/sidecars",
+        "contains": {
+          "kind": "journal",
+          "state": "malformed",
+          "consequence": "rollback_not_applied"
+        }
+      },
+      {
+        "path": "/sidecars",
+        "contains": {
+          "kind": "shm",
+          "state": "malformed",
+          "consequence": "shm_non_authoritative"
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "overflow-cycle",
+    "file": "overflow-cycle.sqlite",
+    "boundary": "overflow successor; validated prefix retained",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/traversals",
+        "contains": {
+          "kind": "overflow",
+          "validatedPrefix": [
+            {
+              "pageNumber": 2
+            }
+          ],
+          "stop": {
+            "reason": "cycle",
+            "claimId": "overflow:page:2"
+          }
+        }
+      },
+      {
+        "path": "/diagnostics",
+        "contains": {
+          "code": "overflow_cycle",
+          "containment": "traversal_stopped"
+        }
+      },
+      {
+        "path": "/relationshipClaims",
+        "contains": {
+          "id": "overflow:page:2",
+          "evidence": {
+            "range": {
+              "pageOffset": 0,
+              "fileOffset": 512,
+              "length": 4
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "broken-overflow",
+    "file": "broken-overflow.sqlite",
+    "boundary": "overflow successor; validated prefix retained",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/traversals",
+        "contains": {
+          "kind": "overflow",
+          "validatedPrefix": [
+            {
+              "pageNumber": 2
+            }
+          ],
+          "stop": {
+            "reason": "invalid_reference",
+            "claimId": "overflow:page:2"
+          }
+        }
+      },
+      {
+        "path": "/diagnostics",
+        "contains": {
+          "code": "overflow_chain_truncated",
+          "containment": "traversal_stopped"
+        }
+      },
+      {
+        "path": "/relationshipClaims",
+        "contains": {
+          "id": "overflow:page:2",
+          "evidence": {
+            "range": {
+              "pageOffset": 0,
+              "fileOffset": 512,
+              "length": 4
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "invalid-pointer-map",
+    "file": "invalid-pointer-map.sqlite",
+    "boundary": "pointer-map entry; forward facts remain authoritative",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/pointerMap/applicable",
+        "equals": true
+      },
+      {
+        "path": "/pages/1/classification/role",
+        "equals": "pointer_map"
+      },
+      {
+        "path": "/pointerMap/pages/0/entries/0/state",
+        "equals": "invalid"
+      },
+      {
+        "path": "/pointerMap/pages/0/entries/0/parentValue",
+        "equals": 500
+      },
+      {
+        "path": "/pointerMap/pages/0/entries/0/evidence/range",
+        "equals": {
+          "pageOffset": 0,
+          "fileOffset": 512,
+          "length": 5
+        }
+      },
+      {
+        "path": "/diagnostics",
+        "contains": {
+          "code": "pointer_map_invalid_largest_root"
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 3,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "wal-tail-little",
+    "file": "wal-tail-little.sqlite",
+    "boundary": "WAL frame 2 truncated; first commit prefix preserved",
+    "fatal": false,
+    "sidecars": {
+      "wal": "wal-tail-little.wal"
+    },
+    "checks": [
+      {
+        "path": "/sidecars",
+        "contains": {
+          "kind": "wal",
+          "state": "malformed",
+          "consequence": "wal_not_applied",
+          "wal": {
+            "validatedFrames": "1",
+            "lastCommitFrame": "1"
+          },
+          "coverage": {
+            "reason": "validation_stop",
+            "evaluatedBytes": "572",
+            "remainingBytes": "0"
+          },
+          "diagnostics": [
+            {
+              "code": "wal_frame_truncated",
+              "offset": "568",
+              "length": "4"
+            }
+          ]
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 1,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "wal-tail-big",
+    "file": "wal-tail-big.sqlite",
+    "boundary": "WAL frame 2 truncated; first commit prefix preserved",
+    "fatal": false,
+    "sidecars": {
+      "wal": "wal-tail-big.wal"
+    },
+    "checks": [
+      {
+        "path": "/sidecars",
+        "contains": {
+          "kind": "wal",
+          "state": "malformed",
+          "consequence": "wal_not_applied",
+          "wal": {
+            "validatedFrames": "1",
+            "lastCommitFrame": "1"
+          },
+          "coverage": {
+            "reason": "validation_stop",
+            "evaluatedBytes": "572",
+            "remainingBytes": "0"
+          },
+          "diagnostics": [
+            {
+              "code": "wal_frame_truncated",
+              "offset": "568",
+              "length": "4"
+            }
+          ]
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 1,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "journal-record-extent",
+    "file": "journal-record-extent.sqlite",
+    "boundary": "rollback record count; no journal application",
+    "fatal": false,
+    "sidecars": {
+      "journal": "journal-record-extent.journal"
+    },
+    "checks": [
+      {
+        "path": "/sidecars",
+        "contains": {
+          "kind": "journal",
+          "state": "malformed",
+          "journal": {
+            "headerValid": true,
+            "hotStatus": "unknown"
+          },
+          "diagnostics": [
+            {
+              "code": "journal_declared_records_truncated",
+              "offset": "8",
+              "length": "4"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "shm-header-checksum",
+    "file": "shm-header-checksum.sqlite",
+    "boundary": "SHM header copies; no authority over main file",
+    "fatal": false,
+    "sidecars": {
+      "shm": "shm-header-checksum.shm"
+    },
+    "checks": [
+      {
+        "path": "/sidecars",
+        "contains": {
+          "kind": "shm",
+          "consequence": "shm_non_authoritative",
+          "shm": {
+            "copiesMatch": true,
+            "headerChecksumsValid": false
+          },
+          "coverage": {
+            "reason": "validation_stop"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "name": "valid-cells",
+    "file": "valid-cells.sqlite",
+    "boundary": "control: independently valid cell records",
+    "fatal": false,
+    "sidecars": {},
+    "checks": [
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 1,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages",
+        "contains": {
+          "number": 2,
+          "detail": {
+            "coverage": "complete"
+          }
+        }
+      },
+      {
+        "path": "/pages/1/detail/cells/0/record/state",
+        "equals": "complete"
+      }
+    ]
+  }
+]

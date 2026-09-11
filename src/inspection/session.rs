@@ -110,6 +110,16 @@ pub struct Diagnostic {
     pub code: &'static str,
     pub message: String,
     pub affected_inputs: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opaque_range: Option<OpaqueRange>,
+}
+
+/// Readable input whose standard geometry cannot be established. No bytes are disclosed.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpaqueRange {
+    pub file_offset: String,
+    pub length: String,
 }
 
 /// Observations retained after invalidation have no revision identity.
@@ -454,7 +464,7 @@ impl SessionData {
         self.status.state = SessionState::Invalidated;
         self.status.revision = None;
         self.status.coverage = Some(self.coverage(CoverageReason::InputChanged));
-        self.status.diagnostic = Some(Diagnostic { code: "input_changed",
+        self.status.diagnostic = Some(Diagnostic { code: "input_changed", opaque_range: None,
             message: "Accepted input changed; retained observations are diagnostic evidence, not a coherent snapshot.".into(),
             affected_inputs: changes });
     }
@@ -892,6 +902,7 @@ impl InspectionSession {
                 data.status.state = SessionState::Fatal;
                 data.status.coverage = Some(data.coverage(CoverageReason::StorageFailure));
                 data.status.diagnostic = Some(Diagnostic {
+                    opaque_range: None,
                     code: "private_storage_unavailable",
                     message: "Private structural evidence could not be read.".into(),
                     affected_inputs: Vec::new(),
@@ -1084,9 +1095,21 @@ impl InspectionSession {
                     d.status.state = SessionState::Fatal;
                     d.status.coverage = Some(d.coverage(CoverageReason::FatalGeometry));
                     d.status.diagnostic = Some(Diagnostic {
-                        code: "fatal_geometry",
-                        message: error.to_string(),
+                        code: if matches!(error, InspectionError::InvalidMagic) {
+                            "unsupported_format"
+                        } else {
+                            "fatal_geometry"
+                        },
+                        message: if matches!(error, InspectionError::InvalidMagic) {
+                            "Readable input preserved as opaque evidence; standard SQLite geometry is unavailable".into()
+                        } else {
+                            error.to_string()
+                        },
                         affected_inputs: vec!["main"],
+                        opaque_range: Some(OpaqueRange {
+                            file_offset: "0".into(),
+                            length: d.inputs.accepted[0].length().to_string(),
+                        }),
                     });
                     return Err(error);
                 }

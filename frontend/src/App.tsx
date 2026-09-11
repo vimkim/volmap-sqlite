@@ -94,7 +94,7 @@ export interface SessionStatus {
   progress: { unit: "pages"; completed: number; total: number | null; verifying: boolean; buildingTopology: boolean; buildingSidecars: boolean; buildingSchema: boolean };
   revision: number | null;
   coverage: Coverage | null;
-  diagnostic: { code: string; message: string; affectedInputs: string[] } | null;
+  diagnostic: { code: string; message: string; affectedInputs: string[]; opaqueRange?: { fileOffset: string; length: string } } | null;
 }
 
 declare global {
@@ -393,6 +393,7 @@ function InspectionNotice({ status }: { status: SessionStatus }) {
       {status.workCoverage.map((work, index) => <p key={index}>{work.phase.replaceAll("_", " ")}: {work.evaluated} / {work.total ?? "unknown"} units; next: {work.next ?? "none"}; remaining: {work.remainder ?? "unknown"}; {work.reason}{work.limit ? ` (${work.limit})` : ""}</p>)}
     </details>}
     {status.diagnostic && <p role="alert">{status.diagnostic.message}</p>}
+    {status.diagnostic?.opaqueRange && <p>Opaque input: offset {status.diagnostic.opaqueRange.fileOffset}; length {status.diagnostic.opaqueRange.length} bytes</p>}
     {status.state === "invalidated" && <p>Navigation and further inspection are disabled. Open a new frozen copy to continue.</p>}
   </section>;
 }

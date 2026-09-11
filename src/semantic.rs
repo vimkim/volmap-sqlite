@@ -300,7 +300,7 @@ fn run(
         coverage.reason = SemanticReason::TimeBudget;
         return None;
     }
-    let reply = validate_reply(schema, &bytes)?;
+    let reply = decode_helper_reply(schema, &bytes)?;
     coverage.reason = SemanticReason::Complete;
     coverage.total_bytes = Some(bytes.len() as u64);
     coverage.remainder_bytes = Some(0);
@@ -370,7 +370,13 @@ fn prepare_copy(
     Some(directory)
 }
 
-fn validate_reply(schema: &SchemaEvidence, bytes: &[u8]) -> Option<SemanticMetadata> {
+/// Decode untrusted helper output against authoritative physical schema evidence.
+/// Rejected messages never return protocol bytes or helper error text.
+#[must_use]
+pub fn decode_helper_reply(schema: &SchemaEvidence, bytes: &[u8]) -> Option<SemanticMetadata> {
+    if bytes.len() as u64 > MAX_OUTPUT || schema.objects.len() > MAX_TABLES {
+        return None;
+    }
     let reply: Reply = serde_json::from_slice(bytes).ok()?;
     if reply.query_mask != EXPECTED_QUERY_MASK
         || reply.version != 1

@@ -519,3 +519,10 @@ On the development Linux host, the debug build inspected 2,000 indexed rows
 topology and schema inspection under the defaults. These observations establish a
 reproducible small-workload baseline, not a large-file performance guarantee. Timings
 and residency depend on the host and allocator.
+
+## Hostile-input corpus and fuzzing
+
+Run `cargo test --test hostile_inputs` for the checked-in damage corpus through the
+inspection session, HTTP and terminal contracts. `python3 fuzz/run.py` runs the
+finite continuous mutation profile; `--profile extended` runs a larger campaign.
+See [the target matrix, limits and reproducer workflow](fuzz/README.md).
