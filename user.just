@@ -6,9 +6,16 @@ build:
     npm --prefix frontend run build
     cargo build --locked --target-dir target
 
-# Open your frozen database in the browser; optional arguments go to the Inspector.
+# Serve on all interfaces at port 3000; --listen overrides the address.
 web database *args: build
-    ./target/debug/volmap-sqlite "$@"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for argument in "$@"; do
+        case "$argument" in
+            --listen|--listen=*) exec ./target/debug/volmap-sqlite "$@" ;;
+        esac
+    done
+    exec ./target/debug/volmap-sqlite --listen 0.0.0.0:3000 "$@"
 
 # Open your frozen database in the terminal; q exits.
 terminal database *args: build

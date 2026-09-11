@@ -4,7 +4,7 @@ set positional-arguments
 generate:
     python3 examples/create_demo.py
 
-# Open catalog (default), wal, or damaged in the browser; open the printed URL.
+# Serve catalog (default), wal, or damaged on all interfaces at port 3000.
 web name="catalog": generate
     just user web "target/examples/$1/database.sqlite" --semantic-metadata
 

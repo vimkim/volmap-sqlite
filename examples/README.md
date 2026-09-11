@@ -13,8 +13,11 @@ just example web             # generate demos, build, print the browser URL
 just example terminal        # the same catalog in the terminal
 ```
 
-Open the printed **Page atlas** URL in your browser. Stop the web server with
-Ctrl-C before starting another command on its default port. In the terminal,
+The `user web` and `example web` recipes listen on **0.0.0.0:3000**, so you can
+connect from another machine. In the printed **Page atlas** URL, replace
+`127.0.0.1` with this server's IP address or hostname, keeping the port and
+`/sessions/...` path. Stop the web server with Ctrl-C before starting another
+command on its default port. In the terminal,
 `q` exits. Both launch commands rebuild the local executable and embedded assets.
 They keep serving until you stop them; they do not automatically open a browser.
 
@@ -34,7 +37,7 @@ schema navigation does not disclose those application values. Browser demos enab
 optional semantic table metadata; deep-value column names remain unavailable.
 
 To inspect your own frozen file, quote paths containing spaces. Extra arguments
-are passed directly to the Inspector:
+are passed directly to the Inspector; `--listen` overrides the recipe default:
 
 ```sh
 just user web '/path/to/frozen database.sqlite'
